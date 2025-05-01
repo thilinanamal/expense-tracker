@@ -16,7 +16,7 @@ import {
 } from "@/components/ui/dialog"
 import { Badge } from "@/components/ui/badge"
 import { useToast } from "@/components/ui/use-toast"
-import { getTransactions, updateTransactionCategory, deleteTransaction } from "@/lib/actions"
+import { getTransactions, updateTransactionCategory, deleteTransaction, deleteTransactionsByAccount } from "@/lib/actions"
 import type { Transaction, Category } from "@/lib/types"
 
 const CATEGORIES: Category[] = [
@@ -40,8 +40,19 @@ export default function TransactionList() {
   const [categoryFilter, setCategoryFilter] = useState<string>("all")
   const [accountFilter, setAccountFilter] = useState<string>("all")
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
+  const [deleteAccountDialogOpen, setDeleteAccountDialogOpen] = useState(false)
   const [transactionToDelete, setTransactionToDelete] = useState<string | null>(null)
+  const [accountToDelete, setAccountToDelete] = useState<string | null>(null)
   const { toast } = useToast()
+
+  // Format account number for display
+  const formatAccountNumber = (accountId: string) => {
+    // If it's a long number, show only first 6 and last 4 digits
+    if (/^\d{10,}$/.test(accountId)) {
+      return `${accountId.slice(0, 6)}...${accountId.slice(-4)}`
+    }
+    return accountId
+  }
 
   // Get unique account numbers from transactions
   const accountNumbers = [...new Set(transactions.map(t => t.accountId))].sort()
@@ -116,6 +127,36 @@ export default function TransactionList() {
     }
   }
 
+  const confirmDeleteAccount = (accountId: string) => {
+    setAccountToDelete(accountId)
+    setDeleteAccountDialogOpen(true)
+  }
+
+  const handleDeleteAccount = async () => {
+    if (!accountToDelete) return
+
+    try {
+      await deleteTransactionsByAccount(accountToDelete)
+
+      // Update local state
+      setTransactions((prev) => prev.filter((t) => t.accountId !== accountToDelete))
+
+      toast({
+        title: "Account transactions deleted",
+        description: "All transactions for this account have been removed successfully",
+      })
+    } catch (error) {
+      toast({
+        title: "Delete failed",
+        description: "Failed to delete account transactions",
+        variant: "destructive",
+      })
+    } finally {
+      setDeleteAccountDialogOpen(false)
+      setAccountToDelete(null)
+    }
+  }
+
   const filteredTransactions = transactions.filter((transaction) => {
     const matchesSearch = transaction.description.toLowerCase().includes(searchTerm.toLowerCase())
     const matchesCategory = categoryFilter === "all" || transaction.categoryId === categoryFilter
@@ -139,9 +180,9 @@ export default function TransactionList() {
   }
 
   const formatAmount = (amount: number) => {
-    return new Intl.NumberFormat("en-US", {
+    return new Intl.NumberFormat("si-LK", {
       style: "currency",
-      currency: "USD",
+      currency: "LKR",
     }).format(amount)
   }
 
@@ -178,11 +219,22 @@ export default function TransactionList() {
               <SelectItem value="all">All Accounts</SelectItem>
               {accountNumbers.map((accountId) => (
                 <SelectItem key={accountId} value={accountId}>
-                  {accountId}
+                  {formatAccountNumber(accountId)}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
+
+          {accountFilter !== "all" && (
+            <Button
+              variant="destructive"
+              size="icon"
+              onClick={() => confirmDeleteAccount(accountFilter)}
+              title="Delete all transactions for this account"
+            >
+              <Trash2Icon className="h-4 w-4" />
+            </Button>
+          )}
 
           <Select value={categoryFilter} onValueChange={(value) => setCategoryFilter(value)}>
             <SelectTrigger className="w-full sm:w-[180px]">
@@ -222,6 +274,7 @@ export default function TransactionList() {
             <TableHeader>
               <TableRow>
                 <TableHead>Date</TableHead>
+                <TableHead>Account</TableHead>
                 <TableHead>Description</TableHead>
                 <TableHead>Category</TableHead>
                 <TableHead className="text-right">Amount</TableHead>
@@ -232,6 +285,7 @@ export default function TransactionList() {
               {filteredTransactions.map((transaction) => (
                 <TableRow key={transaction.id}>
                   <TableCell>{formatDate(transaction.date)}</TableCell>
+                  <TableCell>{formatAccountNumber(transaction.accountId)}</TableCell>
                   <TableCell>{transaction.description}</TableCell>
                   <TableCell>
                     <Select
@@ -295,6 +349,26 @@ export default function TransactionList() {
             </Button>
             <Button variant="destructive" onClick={handleDelete}>
               Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={deleteAccountDialogOpen} onOpenChange={setDeleteAccountDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Account Transactions</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete all transactions for account {accountToDelete ? formatAccountNumber(accountToDelete) : ""}? 
+              This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteAccountDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleDeleteAccount}>
+              Delete All
             </Button>
           </DialogFooter>
         </DialogContent>
