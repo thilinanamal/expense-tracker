@@ -37,8 +37,10 @@ export default function Dashboard() {
     setLoading(true)
     try {
       const data = await getTransactionSummary(timeRange)
+      console.log('Loaded summary:', data) // Add this for debugging
       setSummary(data)
     } catch (error) {
+      console.error('Error loading summary:', error) // Add this for debugging
       toast({
         title: "Error loading summary",
         description: "Failed to load your financial summary. Please try again.",

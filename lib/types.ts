@@ -1,11 +1,16 @@
 export interface Transaction {
   id: string
-  date: string
+  date: string | Date
   description: string
   amount: number
   categoryId: string | null
   accountId: string
   statementId: string
+  category?: {
+    id: string
+    name: string
+    color: string
+  } | null
 }
 
 export interface Category {
