@@ -336,47 +336,144 @@ export async function clearAllData(): Promise<void> {
 }
 
 export async function getTransactionSummary(timeRange: string): Promise<TransactionSummary> {
-  // In a real app, this would calculate from database data
-  // For demo purposes, we'll generate some mock summary data
-
+  // Get all expenses (negative amounts)
+  const expenses = transactions.filter((t) => t.amount < 0)
+  const totalExpenses = Math.abs(expenses.reduce((sum, t) => sum + t.amount, 0))
   const totalIncome = transactions.filter((t) => t.amount > 0).reduce((sum, t) => sum + t.amount, 0)
-
-  const totalExpenses = Math.abs(transactions.filter((t) => t.amount < 0).reduce((sum, t) => sum + t.amount, 0))
-
   const netBalance = totalIncome - totalExpenses
   const savingsRate = totalIncome > 0 ? (netBalance / totalIncome) * 100 : 0
 
-  // Mock category data
-  const expensesByCategory = [
-    { category: "Groceries", amount: totalExpenses * 0.25 },
-    { category: "Dining", amount: totalExpenses * 0.15 },
-    { category: "Shopping", amount: totalExpenses * 0.2 },
-    { category: "Transportation", amount: totalExpenses * 0.1 },
-    { category: "Utilities", amount: totalExpenses * 0.15 },
-    { category: "Healthcare", amount: totalExpenses * 0.05 },
-    { category: "Other", amount: totalExpenses * 0.1 },
-  ]
+  // Calculate actual expenses by category
+  const expensesByCategory = Object.entries(
+    expenses.reduce((acc, transaction) => {
+      const category = transaction.categoryId || "Other"
+      acc[category] = (acc[category] || 0) + Math.abs(transaction.amount)
+      return acc
+    }, {} as Record<string, number>)
+  ).map(([categoryId, amount]) => ({
+    category: categoryId === "null" ? "Other" : 
+             categoryId === "groceries" ? "Groceries" :
+             categoryId === "dining" ? "Dining" :
+             categoryId === "shopping" ? "Shopping" :
+             categoryId === "transportation" ? "Transportation" :
+             categoryId === "utilities" ? "Utilities" :
+             categoryId === "healthcare" ? "Healthcare" :
+             categoryId === "other" ? "Other" : categoryId,
+    amount
+  }))
 
-  // Mock monthly data
-  const monthlyData = [
-    { month: "Jan", income: 450000, expenses: 320000 },
-    { month: "Feb", income: 420000, expenses: 340000 },
-    { month: "Mar", income: 480000, expenses: 310000 },
-    { month: "Apr", income: 430000, expenses: 360000 },
-    { month: "May", income: 470000, expenses: 330000 },
-    { month: "Jun", income: 440000, expenses: 350000 },
-  ]
+  // Calculate actual monthly data
+  const monthlyData = Array.from(
+    transactions.reduce((acc, transaction) => {
+      const date = new Date(transaction.date)
+      const monthKey = date.toLocaleString('default', { month: 'short' })
+      
+      if (!acc.has(monthKey)) {
+        acc.set(monthKey, { month: monthKey, income: 0, expenses: 0 })
+      }
+      
+      const monthData = acc.get(monthKey)!
+      if (transaction.amount > 0) {
+        monthData.income += transaction.amount
+      } else {
+        monthData.expenses += Math.abs(transaction.amount)
+      }
+      
+      return acc
+    }, new Map<string, { month: string; income: number; expenses: number }>())
+  ).map(([_, data]) => data)
+  
+  // Sort monthly data chronologically
+  const monthOrder = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  monthlyData.sort((a, b) => monthOrder.indexOf(a.month) - monthOrder.indexOf(b.month))
+
+  // Calculate income and expense changes from previous period
+  const previousPeriodExpenses = calculatePreviousPeriodExpenses(transactions, timeRange)
+  const previousPeriodIncome = calculatePreviousPeriodIncome(transactions, timeRange)
+  
+  const expenseChange = previousPeriodExpenses ? ((totalExpenses - previousPeriodExpenses) / previousPeriodExpenses) * 100 : 0
+  const incomeChange = previousPeriodIncome ? ((totalIncome - previousPeriodIncome) / previousPeriodIncome) * 100 : 0
 
   return {
     totalIncome,
     totalExpenses,
     netBalance,
-    incomeChange: 5.2,
-    expenseChange: -2.8,
+    incomeChange,
+    expenseChange,
     savingsRate,
     expensesByCategory,
     monthlyData,
   }
+}
+
+function calculatePreviousPeriodExpenses(transactions: Transaction[], timeRange: string): number {
+  const now = new Date()
+  let startDate: Date
+  let previousStartDate: Date
+  let previousEndDate: Date
+
+  switch (timeRange) {
+    case 'month':
+      startDate = new Date(now.getFullYear(), now.getMonth(), 1)
+      previousStartDate = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+      previousEndDate = new Date(now.getFullYear(), now.getMonth(), 0)
+      break
+    case 'quarter':
+      startDate = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1)
+      previousStartDate = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3 - 3, 1)
+      previousEndDate = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 0)
+      break
+    case 'year':
+      startDate = new Date(now.getFullYear(), 0, 1)
+      previousStartDate = new Date(now.getFullYear() - 1, 0, 1)
+      previousEndDate = new Date(now.getFullYear(), 0, 0)
+      break
+    default:
+      return 0
+  }
+
+  return Math.abs(
+    transactions
+      .filter(t => {
+        const date = new Date(t.date)
+        return t.amount < 0 && date >= previousStartDate && date <= previousEndDate
+      })
+      .reduce((sum, t) => sum + t.amount, 0)
+  )
+}
+
+function calculatePreviousPeriodIncome(transactions: Transaction[], timeRange: string): number {
+  const now = new Date()
+  let startDate: Date
+  let previousStartDate: Date
+  let previousEndDate: Date
+
+  switch (timeRange) {
+    case 'month':
+      startDate = new Date(now.getFullYear(), now.getMonth(), 1)
+      previousStartDate = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+      previousEndDate = new Date(now.getFullYear(), now.getMonth(), 0)
+      break
+    case 'quarter':
+      startDate = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1)
+      previousStartDate = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3 - 3, 1)
+      previousEndDate = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 0)
+      break
+    case 'year':
+      startDate = new Date(now.getFullYear(), 0, 1)
+      previousStartDate = new Date(now.getFullYear() - 1, 0, 1)
+      previousEndDate = new Date(now.getFullYear(), 0, 0)
+      break
+    default:
+      return 0
+  }
+
+  return transactions
+    .filter(t => {
+      const date = new Date(t.date)
+      return t.amount > 0 && date >= previousStartDate && date <= previousEndDate
+    })
+    .reduce((sum, t) => sum + t.amount, 0)
 }
 
 // Helper function to find matching field names in CSV records

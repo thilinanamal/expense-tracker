@@ -7,6 +7,7 @@ import { useToast } from "@/components/ui/use-toast"
 import { getTransactionSummary } from "@/lib/actions"
 import type { TransactionSummary } from "@/lib/types"
 import { BarChart, Bar, PieChart, Pie, Cell, ResponsiveContainer, XAxis, YAxis, Tooltip, Legend } from "recharts"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 
 const COLORS = [
   "#10B981", // emerald-500
@@ -190,6 +191,37 @@ export default function Dashboard() {
                 </BarChart>
               </ResponsiveContainer>
             </div>
+          </CardContent>
+        </Card>
+
+        <Card className="col-span-1">
+          <CardHeader>
+            <CardTitle>Category-wise Spending</CardTitle>
+            <CardDescription>Total amount spent in each category</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Category</TableHead>
+                  <TableHead className="text-right">Amount</TableHead>
+                  <TableHead className="text-right">% of Total</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {summary.expensesByCategory
+                  .sort((a, b) => b.amount - a.amount) // Sort by amount in descending order
+                  .map((category, index) => (
+                    <TableRow key={index}>
+                      <TableCell className="font-medium">{category.category}</TableCell>
+                      <TableCell className="text-right">{formatCurrency(category.amount)}</TableCell>
+                      <TableCell className="text-right">
+                        {((category.amount / summary.totalExpenses) * 100).toFixed(1)}%
+                      </TableCell>
+                    </TableRow>
+                  ))}
+              </TableBody>
+            </Table>
           </CardContent>
         </Card>
       </div>
