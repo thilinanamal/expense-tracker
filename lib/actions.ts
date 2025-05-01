@@ -96,6 +96,18 @@ export async function processStatement(formData: FormData): Promise<StatementPar
 
 async function parseStatementWithGemini(content: string, fileName: string): Promise<Transaction[]> {
   try {
+    // First try to extract account numbers from the content
+    const rows = content.split('\n')
+    const accountNumbers = new Set<string>()
+    const accountPattern = /\b\d{12}\b/  // Pattern for 12-digit account numbers
+    
+    rows.forEach(row => {
+      const match = row.match(accountPattern)
+      if (match) {
+        accountNumbers.add(match[0])
+      }
+    })
+
     // Determine the type of statement for better prompting
     let statementType = "unknown"
     if (fileName.includes("savings")) {
@@ -119,8 +131,9 @@ For each transaction, extract:
 1. Date (in YYYY-MM-DD format)
 2. Description
 3. Amount (positive for income/credits, negative for expenses/debits)
+4. Account number (if present in the transaction details)
 
-Return the data as a JSON array of objects with these fields: date, description, amount.
+Return the data as a JSON array of objects with these fields: date, description, amount, accountNumber.
 Only return the JSON array, nothing else.
 
 Here's the statement content:
@@ -216,12 +229,15 @@ ${truncatedContent}
           amount = Number.parseFloat(cleanedAmount) || 0
         }
 
+        // Get account number, fallback to the first account found in the statement
+        const accountId = (item.accountNumber || Array.from(accountNumbers)[0] || "unknown-account").toString().trim()
+
         return {
           date: date.toISOString(),
           description: item.description || "Unknown transaction",
           amount: amount,
           categoryId: null,
-          accountId: `${statementType}-account`,
+          accountId,
         }
       })
       .filter((tx: Transaction) => !isNaN(tx.amount))
@@ -357,12 +373,12 @@ export async function getTransactionSummary(timeRange: string): Promise<Transact
 
   // Mock monthly data
   const monthlyData = [
-    { month: "Jan", income: 4500, expenses: 3200 },
-    { month: "Feb", income: 4200, expenses: 3400 },
-    { month: "Mar", income: 4800, expenses: 3100 },
-    { month: "Apr", income: 4300, expenses: 3600 },
-    { month: "May", income: 4700, expenses: 3300 },
-    { month: "Jun", income: 4400, expenses: 3500 },
+    { month: "Jan", income: 450000, expenses: 320000 },
+    { month: "Feb", income: 420000, expenses: 340000 },
+    { month: "Mar", income: 480000, expenses: 310000 },
+    { month: "Apr", income: 430000, expenses: 360000 },
+    { month: "May", income: 470000, expenses: 330000 },
+    { month: "Jun", income: 440000, expenses: 350000 },
   ]
 
   return {
@@ -385,10 +401,24 @@ function parseSavingsStatement(csvContent: string): Transaction[] {
       skip_empty_lines: true,
       relax_column_count: true,
       skip_records_with_error: true,
+      trim: true,
     })
 
     return records
       .map((record: any) => {
+        // Look for account number in common field names
+        const accountField = findField(record, [
+          "Account No",
+          "Account Number",
+          "AccountNumber",
+          "Account",
+          "acc_no",
+          "account_no"
+        ])
+        
+        // Get the account number, falling back to first column if no match
+        const accountNumber = record[accountField] || Object.values(record)[0] || "unknown-account"
+
         const isDeposit = record.Deposits && Number.parseFloat(record.Deposits) > 0
         const isWithdrawal = record.Withdrawals && Number.parseFloat(record.Withdrawals) > 0
 
@@ -405,7 +435,7 @@ function parseSavingsStatement(csvContent: string): Transaction[] {
               ? -Number.parseFloat(record.Withdrawals)
               : 0,
           categoryId: null,
-          accountId: record["Account Number"] || "unknown",
+          accountId: accountNumber.toString().trim(),
         }
       })
       .filter((tx: Transaction) => tx.amount !== 0)
@@ -496,7 +526,7 @@ function parseAmexStatement(csvContent: string): Transaction[] {
         id: `amex-sample-1`,
         date: new Date().toISOString(),
         description: "SAMPLE AMEX TRANSACTION",
-        amount: -125.45,
+        amount: -12545.00,
         categoryId: null,
         accountId: "amex-account",
         statementId: "sample-statement",
@@ -505,7 +535,7 @@ function parseAmexStatement(csvContent: string): Transaction[] {
         id: `amex-sample-2`,
         date: new Date().toISOString(),
         description: "SAMPLE AMEX PAYMENT",
-        amount: 500.0,
+        amount: 50000.00,
         categoryId: null,
         accountId: "amex-account",
         statementId: "sample-statement",
@@ -516,24 +546,38 @@ function parseAmexStatement(csvContent: string): Transaction[] {
 
 function parseSampathStatement(content: string): Transaction[] {
   try {
-    // Check if content is defined and is a string
     if (!content || typeof content !== "string") {
       console.error("Invalid content provided to parseSampathStatement:", content)
       return []
     }
 
-    // For text-based statements like the Sampath one, we need to parse line by line
     const lines = content.split("\n")
     const transactions: Transaction[] = []
+    let currentAccountNumber = "unknown-account"
+
+    // First pass: look for account numbers
+    const accountPattern = /\b\d{12}\b/  // Pattern for 12-digit account numbers
+    lines.forEach(line => {
+      const match = line.match(accountPattern)
+      if (match) {
+        currentAccountNumber = match[0]
+      }
+    })
 
     // Look for transaction patterns in the text
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]
 
+      // Look for account number in current line
+      const accountMatch = line.match(accountPattern)
+      if (accountMatch) {
+        currentAccountNumber = accountMatch[0]
+        continue
+      }
+
       // Look for date patterns like DD/MM/YY
       const dateMatch = line.match(/(\d{2})\/(\d{2})\/(\d{2})/)
       if (dateMatch) {
-        // Try to extract transaction details from this line and next few lines
         const descriptionLine = lines[i + 1] || ""
         const amountLine = lines[i + 2] || ""
 
@@ -545,32 +589,23 @@ function parseSampathStatement(content: string): Transaction[] {
           transactions.push({
             date: new Date(`20${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]}`).toISOString(),
             description: descriptionLine.trim() || "Unknown transaction",
-            // Determine if credit or debit based on context
             amount: descriptionLine.includes("CR") ? amount : -amount,
             categoryId: null,
-            accountId: "sampath-credit-card",
+            accountId: currentAccountNumber,
           })
         }
       }
-
-      // Alternative pattern for Sampath statements (DD/MM/YYYY format)
-      const altDateMatch = line.match(/(\d{2})\/(\d{2})\/(\d{4})/)
-      if (altDateMatch && !dateMatch) {
-        // Similar processing as above
-        // ...
-      }
     }
 
-    // If we couldn't parse any transactions, create some sample ones based on the statement
-    if (transactions.length === 0) {
-      // Extract some sample transactions from the Sampath statement
+    // If we couldn't parse any transactions, create samples with the detected account number
+    if (transactions.length === 0 && currentAccountNumber !== "unknown-account") {
       if (content.includes("NIHAL STORES")) {
         transactions.push({
           date: new Date("2025-03-23").toISOString(),
           description: "NIHAL STORES & DISTRIBUTO, KANDY",
           amount: -10405.75,
           categoryId: null,
-          accountId: "sampath-credit-card",
+          accountId: currentAccountNumber,
         })
       }
 
@@ -580,7 +615,7 @@ function parseSampathStatement(content: string): Transaction[] {
           description: "VENUS PHARMACY, KANDY",
           amount: -1750.0,
           categoryId: null,
-          accountId: "sampath-credit-card",
+          accountId: currentAccountNumber,
         })
       }
 
@@ -590,7 +625,7 @@ function parseSampathStatement(content: string): Transaction[] {
           description: "PAYMENT RECEIVED - CEFT",
           amount: 250000.0,
           categoryId: null,
-          accountId: "sampath-credit-card",
+          accountId: currentAccountNumber,
         })
       }
     }
@@ -604,13 +639,11 @@ function parseSampathStatement(content: string): Transaction[] {
 
 function parseGenericStatement(csvContent: string): Transaction[] {
   try {
-    // Check if content is defined and is a string
     if (!csvContent || typeof csvContent !== "string") {
       console.error("Invalid content provided to parseGenericStatement:", csvContent)
       return []
     }
 
-    // Try to parse as generic CSV with flexible options
     const records = parse(csvContent, {
       columns: true,
       skip_empty_lines: true,
@@ -621,6 +654,10 @@ function parseGenericStatement(csvContent: string): Transaction[] {
 
     return records
       .map((record: any) => {
+        // Look for account number in the first column or specific account column
+        const accountField = findField(record, ["Account No", "Account Number", "AccountNumber", "Account"])
+        const accountNumber = record[accountField] || Object.values(record)[0] || "unknown-account"
+
         // Look for common column names
         const dateField = findField(record, ["date", "transaction_date", "trans_date", "Date"])
         const descriptionField = findField(record, ["description", "desc", "narrative", "details", "Description"])
@@ -663,7 +700,7 @@ function parseGenericStatement(csvContent: string): Transaction[] {
           description: record[descriptionField] || "Unknown transaction",
           amount,
           categoryId: null,
-          accountId: "generic-account",
+          accountId: accountNumber.toString().trim(),
         }
       })
       .filter((tx: Transaction) => !isNaN(tx.amount))

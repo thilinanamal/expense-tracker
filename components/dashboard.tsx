@@ -49,9 +49,9 @@ export default function Dashboard() {
   }
 
   const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat("en-US", {
+    return new Intl.NumberFormat("si-LK", {
       style: "currency",
-      currency: "USD",
+      currency: "LKR",
     }).format(amount)
   }
 
@@ -182,7 +182,7 @@ export default function Dashboard() {
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={summary.monthlyData}>
                   <XAxis dataKey="month" />
-                  <YAxis tickFormatter={(value) => `$${value}`} />
+                  <YAxis tickFormatter={(value) => `Rs ${value}`} />
                   <Tooltip formatter={(value) => formatCurrency(Number(value))} />
                   <Legend />
                   <Bar dataKey="income" name="Income" fill="#10B981" />

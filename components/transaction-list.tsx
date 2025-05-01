@@ -43,6 +43,15 @@ export default function TransactionList() {
   const [transactionToDelete, setTransactionToDelete] = useState<string | null>(null)
   const { toast } = useToast()
 
+  // Format account number for display
+  const formatAccountNumber = (accountId: string) => {
+    // If it's a long number, show only first 6 and last 4 digits
+    if (/^\d{10,}$/.test(accountId)) {
+      return `${accountId.slice(0, 6)}...${accountId.slice(-4)}`
+    }
+    return accountId
+  }
+
   // Get unique account numbers from transactions
   const accountNumbers = [...new Set(transactions.map(t => t.accountId))].sort()
 
@@ -139,9 +148,9 @@ export default function TransactionList() {
   }
 
   const formatAmount = (amount: number) => {
-    return new Intl.NumberFormat("en-US", {
+    return new Intl.NumberFormat("si-LK", {
       style: "currency",
-      currency: "USD",
+      currency: "LKR",
     }).format(amount)
   }
 
@@ -178,7 +187,7 @@ export default function TransactionList() {
               <SelectItem value="all">All Accounts</SelectItem>
               {accountNumbers.map((accountId) => (
                 <SelectItem key={accountId} value={accountId}>
-                  {accountId}
+                  {formatAccountNumber(accountId)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -222,6 +231,7 @@ export default function TransactionList() {
             <TableHeader>
               <TableRow>
                 <TableHead>Date</TableHead>
+                <TableHead>Account</TableHead>
                 <TableHead>Description</TableHead>
                 <TableHead>Category</TableHead>
                 <TableHead className="text-right">Amount</TableHead>
@@ -232,6 +242,7 @@ export default function TransactionList() {
               {filteredTransactions.map((transaction) => (
                 <TableRow key={transaction.id}>
                   <TableCell>{formatDate(transaction.date)}</TableCell>
+                  <TableCell>{formatAccountNumber(transaction.accountId)}</TableCell>
                   <TableCell>{transaction.description}</TableCell>
                   <TableCell>
                     <Select
