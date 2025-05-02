@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache"
 import { parse } from "csv-parse/sync"
 import type { Transaction, TransactionSummary, StatementParseResult } from "./types"
+import { prisma } from "./db"
 
 // Mock database for demo purposes
 let transactions: Transaction[] = []
@@ -49,20 +50,22 @@ export async function processStatement(formData: FormData): Promise<StatementPar
 
     // Ensure all transactions have the correct account ID
     const statementId = `statement-${Date.now()}`
-    const transactionsWithIds = parsedTransactions.map((t, index) => ({
+    const transactionsToInsert = parsedTransactions.map((t) => ({
       ...t,
-      id: `tx-${Date.now()}-${index}`,
+      accountId: t.accountId === "unknown-account" ? fileName : t.accountId,
       statementId,
-      // If no account ID was found in the CSV, use the filename
-      accountId: t.accountId === "unknown-account" ? fileName : t.accountId
     }))
 
-    transactions = [...transactions, ...transactionsWithIds]
+    // Insert transactions into the database
+    await prisma.transaction.createMany({
+      data: transactionsToInsert,
+    })
+
     revalidatePath("/")
 
     return {
       success: true,
-      transactionsCount: transactionsWithIds.length,
+      transactionsCount: transactionsToInsert.length,
     }
   } catch (error) {
     console.error("Error processing statement:", error)
@@ -227,253 +230,398 @@ ${truncatedContent}
 }
 
 export async function getTransactions(): Promise<Transaction[]> {
-  // In a real app, this would fetch from a database
-  return transactions.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+  const transactions = await prisma.transaction.findMany({
+    orderBy: { date: 'desc' },
+    include: { category: true }
+  })
+
+  return transactions.map(tx => ({
+    ...tx,
+    date: tx.date.toISOString()
+  }))
 }
 
 export async function updateTransactionCategory(transactionId: string, categoryId: string): Promise<void> {
-  // In a real app, this would update the database
-  transactions = transactions.map((t) => (t.id === transactionId ? { ...t, categoryId } : t))
-
-  revalidatePath("/")
+  try {
+    console.log(`Updating transaction ${transactionId} with category ${categoryId}`)
+    
+    const result = await prisma.transaction.update({
+      where: { id: transactionId },
+      data: { categoryId }
+    })
+    
+    console.log('Update successful:', result)
+    revalidatePath("/")
+  } catch (error) {
+    console.error('Error updating transaction category:', error)
+    // Try to find the transaction to see if it exists
+    const transaction = await prisma.transaction.findUnique({
+      where: { id: transactionId }
+    })
+    console.log('Transaction found?', transaction)
+    throw error
+  }
 }
 
 export async function deleteTransaction(transactionId: string): Promise<void> {
-  // In a real app, this would delete from the database
-  transactions = transactions.filter((t) => t.id !== transactionId)
+  await prisma.transaction.delete({
+    where: { id: transactionId }
+  })
 
   revalidatePath("/")
 }
 
 export async function deleteTransactionsByAccount(accountId: string): Promise<void> {
-  // In a real app, this would delete from the database
-  transactions = transactions.filter((t) => t.accountId !== accountId)
+  await prisma.transaction.deleteMany({
+    where: { accountId }
+  })
 
   revalidatePath("/")
 }
 
 export async function clearTransactionsByMonth(monthOption: string): Promise<void> {
-  // Get current date
   const now = new Date()
-  let cutoffDate: Date
+  let deleteCondition: any
 
   switch (monthOption) {
     case "current":
-      // Current month - keep transactions from this month
-      cutoffDate = new Date(now.getFullYear(), now.getMonth(), 1)
-      transactions = transactions.filter((t) => new Date(t.date) >= cutoffDate)
+      deleteCondition = {
+        date: {
+          lt: new Date(now.getFullYear(), now.getMonth(), 1)
+        }
+      }
       break
     case "previous":
-      // Previous month - remove transactions from previous month
       const previousMonth = now.getMonth() - 1
       const yearOfPreviousMonth = previousMonth < 0 ? now.getFullYear() - 1 : now.getFullYear()
       const normalizedPreviousMonth = previousMonth < 0 ? 11 : previousMonth
 
-      const startOfPreviousMonth = new Date(yearOfPreviousMonth, normalizedPreviousMonth, 1)
-      const startOfCurrentMonth = new Date(now.getFullYear(), now.getMonth(), 1)
-
-      transactions = transactions.filter((t) => {
-        const txDate = new Date(t.date)
-        return txDate < startOfPreviousMonth || txDate >= startOfCurrentMonth
-      })
+      deleteCondition = {
+        AND: [
+          {
+            date: {
+              gte: new Date(yearOfPreviousMonth, normalizedPreviousMonth, 1)
+            }
+          },
+          {
+            date: {
+              lt: new Date(now.getFullYear(), now.getMonth(), 1)
+            }
+          }
+        ]
+      }
       break
     case "2months":
-      // 2 months ago - remove transactions from 2 months ago
       const twoMonthsAgo = now.getMonth() - 2
       const yearOfTwoMonthsAgo = twoMonthsAgo < 0 ? now.getFullYear() - 1 : now.getFullYear()
       const normalizedTwoMonthsAgo = twoMonthsAgo < 0 ? 12 + twoMonthsAgo : twoMonthsAgo
 
-      const startOfTwoMonthsAgo = new Date(yearOfTwoMonthsAgo, normalizedTwoMonthsAgo, 1)
-      const endOfTwoMonthsAgo = new Date(yearOfTwoMonthsAgo, normalizedTwoMonthsAgo + 1, 0)
-
-      transactions = transactions.filter((t) => {
-        const txDate = new Date(t.date)
-        return txDate < startOfTwoMonthsAgo || txDate > endOfTwoMonthsAgo
-      })
+      deleteCondition = {
+        AND: [
+          {
+            date: {
+              gte: new Date(yearOfTwoMonthsAgo, normalizedTwoMonthsAgo, 1)
+            }
+          },
+          {
+            date: {
+              lt: new Date(yearOfTwoMonthsAgo, normalizedTwoMonthsAgo + 1, 1)
+            }
+          }
+        ]
+      }
       break
     case "3months":
-      // 3 months ago - remove transactions from 3 months ago
       const threeMonthsAgo = now.getMonth() - 3
       const yearOfThreeMonthsAgo = threeMonthsAgo < 0 ? now.getFullYear() - 1 : now.getFullYear()
       const normalizedThreeMonthsAgo = threeMonthsAgo < 0 ? 12 + threeMonthsAgo : threeMonthsAgo
 
-      const startOfThreeMonthsAgo = new Date(yearOfThreeMonthsAgo, normalizedThreeMonthsAgo, 1)
-      const endOfThreeMonthsAgo = new Date(yearOfThreeMonthsAgo, normalizedThreeMonthsAgo + 1, 0)
-
-      transactions = transactions.filter((t) => {
-        const txDate = new Date(t.date)
-        return txDate < startOfThreeMonthsAgo || txDate > endOfThreeMonthsAgo
-      })
+      deleteCondition = {
+        AND: [
+          {
+            date: {
+              gte: new Date(yearOfThreeMonthsAgo, normalizedThreeMonthsAgo, 1)
+            }
+          },
+          {
+            date: {
+              lt: new Date(yearOfThreeMonthsAgo, normalizedThreeMonthsAgo + 1, 1)
+            }
+          }
+        ]
+      }
       break
     case "older":
-      // Older than 3 months - keep only transactions from the last 3 months
-      cutoffDate = new Date()
+      const cutoffDate = new Date()
       cutoffDate.setMonth(cutoffDate.getMonth() - 3)
-      transactions = transactions.filter((t) => new Date(t.date) >= cutoffDate)
+      deleteCondition = {
+        date: {
+          lt: cutoffDate
+        }
+      }
       break
     default:
-      // Invalid option, do nothing
-      break
+      return
   }
+
+  await prisma.transaction.deleteMany({
+    where: deleteCondition
+  })
 
   revalidatePath("/")
 }
 
 export async function clearAllTransactions(): Promise<void> {
-  // Clear all transactions
-  transactions = []
-
+  await prisma.transaction.deleteMany()
   revalidatePath("/")
 }
 
 export async function clearAllData(): Promise<void> {
-  // Clear all data including transactions and any other data
-  transactions = []
-
-  // In a real app, this would also clear categories, settings, etc.
+  await prisma.$transaction([
+    prisma.transaction.deleteMany(),
+    prisma.category.deleteMany()
+  ])
 
   revalidatePath("/")
 }
 
-export async function getTransactionSummary(timeRange: string): Promise<TransactionSummary> {
-  // Get all expenses (negative amounts)
-  const expenses = transactions.filter((t) => t.amount < 0)
-  const totalExpenses = Math.abs(expenses.reduce((sum, t) => sum + t.amount, 0))
-  const totalIncome = transactions.filter((t) => t.amount > 0).reduce((sum, t) => sum + t.amount, 0)
-  const netBalance = totalIncome - totalExpenses
-  const savingsRate = totalIncome > 0 ? (netBalance / totalIncome) * 100 : 0
+export async function getTransactionSummary(timeRange: string, customStartDate?: string, customEndDate?: string): Promise<TransactionSummary> {
+  try {
+    console.log('Getting transaction summary for timeRange:', timeRange)
+    const now = new Date()
+    let startDate: Date
+    let previousStartDate: Date
+    let previousEndDate: Date
 
-  // Calculate actual expenses by category
-  const expensesByCategory = Object.entries(
-    expenses.reduce((acc, transaction) => {
-      const category = transaction.categoryId || "Other"
-      acc[category] = (acc[category] || 0) + Math.abs(transaction.amount)
-      return acc
-    }, {} as Record<string, number>)
-  ).map(([categoryId, amount]) => ({
-    category: categoryId === "null" ? "Other" : 
-             categoryId === "groceries" ? "Groceries" :
-             categoryId === "dining" ? "Dining" :
-             categoryId === "shopping" ? "Shopping" :
-             categoryId === "transportation" ? "Transportation" :
-             categoryId === "utilities" ? "Utilities" :
-             categoryId === "healthcare" ? "Healthcare" :
-             categoryId === "other" ? "Other" : categoryId,
-    amount
-  }))
+    switch (timeRange) {
+      case 'custom':
+        // Handle custom date range if provided
+        if (customStartDate && customEndDate) {
+          startDate = new Date(customStartDate)
+          // For the previous period, use the same duration before the start date
+          const duration = new Date(customEndDate).getTime() - startDate.getTime()
+          previousEndDate = new Date(startDate.getTime() - 1)
+          previousStartDate = new Date(startDate.getTime() - duration - 1)
+        } else {
+          // Fallback to current month if custom dates aren't provided
+          startDate = new Date(now.getFullYear(), now.getMonth(), 1)
+          previousStartDate = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+          previousEndDate = new Date(now.getFullYear(), now.getMonth(), 0)
+        }
+        break
+      case 'month':
+        // This month: from 1st of current month to now
+        startDate = new Date(now.getFullYear(), now.getMonth(), 1)
+        // Previous month: from 1st to last day of previous month
+        previousStartDate = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+        previousEndDate = new Date(now.getFullYear(), now.getMonth(), 0)
+        break
+      case 'quarter':
+        // Current quarter
+        startDate = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1)
+        // Previous quarter
+        previousStartDate = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3 - 3, 1)
+        previousEndDate = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 0)
+        break
+      case 'year':
+        // Current year: from Jan 1st to now
+        startDate = new Date(now.getFullYear(), 0, 1)
+        // Previous year: all of last year
+        previousStartDate = new Date(now.getFullYear() - 1, 0, 1)
+        previousEndDate = new Date(now.getFullYear(), 0, 0)
+        break
+      case 'all':
+        // For 'all time', use a very old start date
+        startDate = new Date(2000, 0, 1)
+        previousStartDate = new Date(1999, 0, 1)
+        previousEndDate = new Date(1999, 11, 31)
+        break
+      default:
+        // Default to current month
+        startDate = new Date(now.getFullYear(), now.getMonth(), 1)
+        previousStartDate = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+        previousEndDate = new Date(now.getFullYear(), now.getMonth(), 0)
+    }
 
-  // Calculate actual monthly data
-  const monthlyData = Array.from(
-    transactions.reduce((acc, transaction) => {
-      const date = new Date(transaction.date)
-      const monthKey = date.toLocaleString('default', { month: 'short' })
-      
-      if (!acc.has(monthKey)) {
-        acc.set(monthKey, { month: monthKey, income: 0, expenses: 0 })
-      }
-      
-      const monthData = acc.get(monthKey)!
-      if (transaction.amount > 0) {
-        monthData.income += transaction.amount
-      } else {
-        monthData.expenses += Math.abs(transaction.amount)
-      }
-      
-      return acc
-    }, new Map<string, { month: string; income: number; expenses: number }>())
-  ).map(([_, data]) => data)
-  
-  // Sort monthly data chronologically
-  const monthOrder = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-  monthlyData.sort((a, b) => monthOrder.indexOf(a.month) - monthOrder.indexOf(b.month))
-
-  // Calculate income and expense changes from previous period
-  const previousPeriodExpenses = calculatePreviousPeriodExpenses(transactions, timeRange)
-  const previousPeriodIncome = calculatePreviousPeriodIncome(transactions, timeRange)
-  
-  const expenseChange = previousPeriodExpenses ? ((totalExpenses - previousPeriodExpenses) / previousPeriodExpenses) * 100 : 0
-  const incomeChange = previousPeriodIncome ? ((totalIncome - previousPeriodIncome) / previousPeriodIncome) * 100 : 0
-
-  return {
-    totalIncome,
-    totalExpenses,
-    netBalance,
-    incomeChange,
-    expenseChange,
-    savingsRate,
-    expensesByCategory,
-    monthlyData,
-  }
-}
-
-function calculatePreviousPeriodExpenses(transactions: Transaction[], timeRange: string): number {
-  const now = new Date()
-  let startDate: Date
-  let previousStartDate: Date
-  let previousEndDate: Date
-
-  switch (timeRange) {
-    case 'month':
-      startDate = new Date(now.getFullYear(), now.getMonth(), 1)
-      previousStartDate = new Date(now.getFullYear(), now.getMonth() - 1, 1)
-      previousEndDate = new Date(now.getFullYear(), now.getMonth(), 0)
-      break
-    case 'quarter':
-      startDate = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1)
-      previousStartDate = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3 - 3, 1)
-      previousEndDate = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 0)
-      break
-    case 'year':
-      startDate = new Date(now.getFullYear(), 0, 1)
-      previousStartDate = new Date(now.getFullYear() - 1, 0, 1)
-      previousEndDate = new Date(now.getFullYear(), 0, 0)
-      break
-    default:
-      return 0
-  }
-
-  return Math.abs(
-    transactions
-      .filter(t => {
-        const date = new Date(t.date)
-        return t.amount < 0 && date >= previousStartDate && date <= previousEndDate
-      })
-      .reduce((sum, t) => sum + t.amount, 0)
-  )
-}
-
-function calculatePreviousPeriodIncome(transactions: Transaction[], timeRange: string): number {
-  const now = new Date()
-  let startDate: Date
-  let previousStartDate: Date
-  let previousEndDate: Date
-
-  switch (timeRange) {
-    case 'month':
-      startDate = new Date(now.getFullYear(), now.getMonth(), 1)
-      previousStartDate = new Date(now.getFullYear(), now.getMonth() - 1, 1)
-      previousEndDate = new Date(now.getFullYear(), now.getMonth(), 0)
-      break
-    case 'quarter':
-      startDate = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1)
-      previousStartDate = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3 - 3, 1)
-      previousEndDate = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 0)
-      break
-    case 'year':
-      startDate = new Date(now.getFullYear(), 0, 1)
-      previousStartDate = new Date(now.getFullYear() - 1, 0, 1)
-      previousEndDate = new Date(now.getFullYear(), 0, 0)
-      break
-    default:
-      return 0
-  }
-
-  return transactions
-    .filter(t => {
-      const date = new Date(t.date)
-      return t.amount > 0 && date >= previousStartDate && date <= previousEndDate
+    console.log('Date ranges:', {
+      startDate: startDate.toISOString(),
+      previousStartDate: previousStartDate.toISOString(),
+      previousEndDate: previousEndDate.toISOString()
     })
-    .reduce((sum, t) => sum + t.amount, 0)
+
+    // First, check if there are any transactions in the database at all
+    const totalCount = await prisma.transaction.count()
+    console.log('Total transactions in database:', totalCount)
+    
+    // If there are no transactions at all, return empty data
+    if (totalCount === 0) {
+      return createEmptySummary()
+    }
+
+    // Get all transactions for the dashboard regardless of time range
+    // The issue is that the transactions have dates from Feb-Mar 2024, but we're filtering for May 2025
+    let currentTransactionsQuery = {}
+    let previousTransactionsQuery = {}
+    
+    // Log a sample transaction to check its date format
+    const sampleTransaction = await prisma.transaction.findFirst()
+    if (sampleTransaction) {
+      console.log('Sample transaction date:', sampleTransaction.date)
+    }
+    
+    // Set up the date filters based on the time range
+    if (timeRange === 'all') {
+      // For 'all time', don't filter by date at all
+      currentTransactionsQuery = {}
+      previousTransactionsQuery = {}
+    } else if (timeRange === 'custom' && customStartDate && customEndDate) {
+      // For custom date range
+      const customStart = new Date(customStartDate)
+      const customEnd = new Date(customEndDate)
+      customEnd.setHours(23, 59, 59, 999) // Include the entire end day
+      
+      // Calculate the previous period with the same duration
+      const duration = customEnd.getTime() - customStart.getTime()
+      const prevPeriodEnd = new Date(customStart.getTime() - 1)
+      const prevPeriodStart = new Date(prevPeriodEnd.getTime() - duration)
+      
+      currentTransactionsQuery = {
+        date: {
+          gte: customStart,
+          lte: customEnd
+        }
+      }
+      
+      previousTransactionsQuery = {
+        date: {
+          gte: prevPeriodStart,
+          lte: prevPeriodEnd
+        }
+      }
+    } else {
+      // For standard time ranges (month, quarter, year)
+      currentTransactionsQuery = {
+        date: {
+          gte: startDate,
+          lte: now
+        }
+      }
+      
+      previousTransactionsQuery = {
+        date: {
+          gte: previousStartDate,
+          lte: previousEndDate
+        }
+      }
+    }
+
+    const [
+      currentTransactions,
+      previousTransactions
+    ] = await Promise.all([
+      prisma.transaction.findMany({
+        where: currentTransactionsQuery,
+        include: { category: true }
+      }),
+      prisma.transaction.findMany({
+        where: previousTransactionsQuery
+      })
+    ])
+
+    console.log('Current transactions found:', currentTransactions.length)
+    console.log('Previous transactions found:', previousTransactions.length)
+    
+    // Log a few sample transactions if available
+    if (currentTransactions.length > 0) {
+      console.log('Sample current transaction:', JSON.stringify(currentTransactions[0]))
+    }
+
+    const expenses = currentTransactions.filter(t => t.amount < 0)
+    console.log('Expense transactions found:', expenses.length)
+    
+    const totalExpenses = Math.abs(expenses.reduce((sum, t) => sum + t.amount, 0))
+    const totalIncome = currentTransactions.filter(t => t.amount > 0).reduce((sum, t) => sum + t.amount, 0)
+    const netBalance = totalIncome - totalExpenses
+    const savingsRate = totalIncome > 0 ? (netBalance / totalIncome) * 100 : 0
+
+    console.log('Summary calculations:', {
+      totalExpenses,
+      totalIncome,
+      netBalance,
+      savingsRate
+    })
+
+    const previousExpenses = Math.abs(previousTransactions.filter(t => t.amount < 0).reduce((sum, t) => sum + t.amount, 0))
+    const previousIncome = previousTransactions.filter(t => t.amount > 0).reduce((sum, t) => sum + t.amount, 0)
+
+    const expenseChange = previousExpenses ? ((totalExpenses - previousExpenses) / previousExpenses) * 100 : 0
+    const incomeChange = previousIncome ? ((totalIncome - previousIncome) / previousIncome) * 100 : 0
+
+    const expensesByCategory = Object.entries(
+      expenses.reduce((acc, transaction) => {
+        const categoryName = transaction.category?.name || 'Other'
+        acc[categoryName] = (acc[categoryName] || 0) + Math.abs(transaction.amount)
+        return acc
+      }, {} as Record<string, number>)
+    ).map(([category, amount]) => ({
+      category,
+      amount
+    }))
+
+    const monthlyData = Array.from(
+      currentTransactions.reduce((acc, transaction) => {
+        const date = new Date(transaction.date)
+        const monthKey = date.toLocaleString('default', { month: 'short' })
+        
+        if (!acc.has(monthKey)) {
+          acc.set(monthKey, { month: monthKey, income: 0, expenses: 0 })
+        }
+        
+        const monthData = acc.get(monthKey)!
+        if (transaction.amount > 0) {
+          monthData.income += transaction.amount
+        } else {
+          monthData.expenses += Math.abs(transaction.amount)
+        }
+        
+        return acc
+      }, new Map<string, { month: string; income: number; expenses: number }>())
+    ).map(([_, data]) => data)
+
+    const monthOrder = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    monthlyData.sort((a, b) => monthOrder.indexOf(a.month) - monthOrder.indexOf(b.month))
+
+    const result = {
+      totalIncome,
+      totalExpenses,
+      netBalance,
+      incomeChange,
+      expenseChange,
+      savingsRate,
+      expensesByCategory,
+      monthlyData,
+    }
+    
+    console.log('Returning summary result:', JSON.stringify(result))
+    return result
+  } catch (error) {
+    console.error('Error in getTransactionSummary:', error)
+    return createEmptySummary()
+  }
+}
+
+// Helper function to create an empty summary when no data is available
+function createEmptySummary(): TransactionSummary {
+  return {
+    totalIncome: 0,
+    totalExpenses: 0,
+    netBalance: 0,
+    incomeChange: 0,
+    expenseChange: 0,
+    savingsRate: 0,
+    expensesByCategory: [],
+    monthlyData: [],
+  }
 }
 
 // Helper function to find matching field names in CSV records
@@ -634,11 +782,13 @@ function parseStatement(csvContent: string, fileName: string = ""): Transaction[
           const finalAmount = isCredit ? Math.abs(amount) : -Math.abs(amount)
 
           return {
+            id: `tx-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
             date: date.toISOString(),
             description,
             amount: finalAmount,
             categoryId: null,
             accountId: finalAccountId,
+            statementId: `statement-${Date.now()}`
           }
         })
         .filter((tx: Transaction) => !isNaN(tx.amount) && tx.amount !== 0)
@@ -670,11 +820,13 @@ function parseStatement(csvContent: string, fileName: string = ""): Transaction[
                            description.toLowerCase().includes("deposit")
 
             transactions.push({
+              id: `tx-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
               date: new Date(`20${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]}`).toISOString(),
               description,
               amount: isCredit ? Math.abs(amount) : -Math.abs(amount),
               categoryId: null,
               accountId: accountIdentifier,
+              statementId: `statement-${Date.now()}`
             })
           }
         }
