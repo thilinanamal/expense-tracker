@@ -8,6 +8,12 @@ import { getTransactionSummary } from "@/lib/actions"
 import type { TransactionSummary } from "@/lib/types"
 import { BarChart, Bar, PieChart, Pie, Cell, ResponsiveContainer, XAxis, YAxis, Tooltip, Legend } from "recharts"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Button } from "@/components/ui/button"
+import { Calendar } from "@/components/ui/calendar"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { format } from "date-fns"
+import { CalendarIcon } from "lucide-react"
+import { cn } from "@/lib/utils"
 
 const COLORS = [
   "#10B981", // emerald-500
@@ -26,30 +32,41 @@ const COLORS = [
 export default function Dashboard() {
   const [summary, setSummary] = useState<TransactionSummary | null>(null)
   const [loading, setLoading] = useState(true)
-  const [timeRange, setTimeRange] = useState("month")
+  const [timeRange, setTimeRange] = useState("month")  // Default to 'month' to show current month
+  const [startDate, setStartDate] = useState<Date | undefined>(undefined)
+  const [endDate, setEndDate] = useState<Date | undefined>(undefined)
+  const [showCustomDateRange, setShowCustomDateRange] = useState(false)
   const { toast } = useToast()
 
   useEffect(() => {
     loadSummary()
-  }, [timeRange])
+  }, [timeRange, startDate, endDate])
 
   const loadSummary = async () => {
     setLoading(true)
     try {
-      const data = await getTransactionSummary(timeRange)
-      console.log('Loaded summary:', data) // Add this for debugging
-      setSummary(data)
+      let data;
+      if (timeRange === 'custom' && startDate && endDate) {
+        // Format dates as ISO strings for the API
+        const startDateStr = startDate.toISOString();
+        const endDateStr = endDate.toISOString();
+        data = await getTransactionSummary(timeRange, startDateStr, endDateStr);
+      } else {
+        data = await getTransactionSummary(timeRange);
+      }
+      console.log('Loaded summary:', data);
+      setSummary(data);
     } catch (error) {
-      console.error('Error loading summary:', error) // Add this for debugging
+      console.error('Error loading summary:', error);
       toast({
         title: "Error loading summary",
         description: "Failed to load your financial summary. Please try again.",
         variant: "destructive",
-      })
+      });
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
-  }
+  };
 
   const formatCurrency = (amount: number) => {
     return new Intl.NumberFormat("si-LK", {
@@ -75,8 +92,21 @@ export default function Dashboard() {
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <h2 className="text-xl font-semibold">Financial Summary</h2>
 
-        <div className="flex items-center gap-2 w-full sm:w-auto">
-          <Select value={timeRange} onValueChange={setTimeRange}>
+        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2 w-full sm:w-auto">
+          <Select value={timeRange} onValueChange={(value) => {
+            setTimeRange(value);
+            if (value === 'custom') {
+              setShowCustomDateRange(true);
+              // Initialize with current month if not already set
+              if (!startDate) {
+                const now = new Date();
+                setStartDate(new Date(now.getFullYear(), now.getMonth(), 1));
+                setEndDate(new Date());
+              }
+            } else {
+              setShowCustomDateRange(false);
+            }
+          }}>
             <SelectTrigger className="w-full sm:w-[180px]">
               <SelectValue placeholder="Time Range" />
             </SelectTrigger>
@@ -85,8 +115,68 @@ export default function Dashboard() {
               <SelectItem value="quarter">Last 3 Months</SelectItem>
               <SelectItem value="year">This Year</SelectItem>
               <SelectItem value="all">All Time</SelectItem>
+              <SelectItem value="custom">Custom Range</SelectItem>
             </SelectContent>
           </Select>
+          
+          {showCustomDateRange && (
+            <div className="flex items-center gap-2 mt-2 sm:mt-0">
+              <div className="grid gap-2">
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      className={cn(
+                        "w-[130px] justify-start text-left font-normal",
+                        !startDate && "text-muted-foreground"
+                      )}
+                    >
+                      <CalendarIcon className="mr-2 h-4 w-4" />
+                      {startDate ? format(startDate, "PPP") : <span>Pick a date</span>}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-0" align="start">
+                    <Calendar
+                      mode="single"
+                      selected={startDate}
+                      onSelect={setStartDate}
+                      initialFocus
+                    />
+                  </PopoverContent>
+                </Popover>
+              </div>
+              
+              <span>to</span>
+              
+              <div className="grid gap-2">
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      className={cn(
+                        "w-[130px] justify-start text-left font-normal",
+                        !endDate && "text-muted-foreground"
+                      )}
+                    >
+                      <CalendarIcon className="mr-2 h-4 w-4" />
+                      {endDate ? format(endDate, "PPP") : <span>Pick a date</span>}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-0" align="start">
+                    <Calendar
+                      mode="single"
+                      selected={endDate}
+                      onSelect={setEndDate}
+                      initialFocus
+                      disabled={(date) => startDate ? date < startDate : false}
+                    />
+                  </PopoverContent>
+                </Popover>
+              </div>
+              
+              <Button onClick={loadSummary} size="sm">Apply</Button>
+            </div>
+          )}
         </div>
       </div>
 

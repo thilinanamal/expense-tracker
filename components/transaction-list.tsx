@@ -27,7 +27,7 @@ const CATEGORIES: Category[] = [
   { id: "entertainment", name: "Entertainment", color: "pink" },
   { id: "shopping", name: "Shopping", color: "orange" },
   { id: "healthcare", name: "Healthcare", color: "red" },
-  { id: "travel", name: "Travel", color: "indigo" },
+  { id: "cash", name: "Cash", color: "indigo" },
   { id: "education", name: "Education", color: "cyan" },
   { id: "income", name: "Income", color: "emerald" },
   { id: "other", name: "Other", color: "gray" },
@@ -186,8 +186,9 @@ export default function TransactionList() {
     }).format(amount)
   }
 
-  const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleDateString("en-US", {
+  const formatDate = (dateInput: string | Date) => {
+    const date = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
+    return date.toLocaleDateString("en-US", {
       year: "numeric",
       month: "short",
       day: "numeric",
