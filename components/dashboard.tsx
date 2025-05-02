@@ -4,16 +4,17 @@ import { useState, useEffect } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useToast } from "@/components/ui/use-toast"
-import { getTransactionSummary } from "@/lib/actions"
-import type { TransactionSummary } from "@/lib/types"
+import { getTransactionSummary, getTransactionsByCategory } from "@/lib/actions"
+import type { TransactionSummary, Transaction } from "@/lib/types"
 import { BarChart, Bar, PieChart, Pie, Cell, ResponsiveContainer, XAxis, YAxis, Tooltip, Legend } from "recharts"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Button } from "@/components/ui/button"
 import { Calendar } from "@/components/ui/calendar"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { format } from "date-fns"
-import { CalendarIcon } from "lucide-react"
+import { CalendarIcon, ChevronDownIcon, ChevronUpIcon, ArrowUpIcon, ArrowDownIcon } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { Badge } from "@/components/ui/badge"
 
 const COLORS = [
   "#10B981", // emerald-500
@@ -36,6 +37,9 @@ export default function Dashboard() {
   const [startDate, setStartDate] = useState<Date | undefined>(undefined)
   const [endDate, setEndDate] = useState<Date | undefined>(undefined)
   const [showCustomDateRange, setShowCustomDateRange] = useState(false)
+  const [expandedCategory, setExpandedCategory] = useState<string | null>(null)
+  const [categoryTransactions, setCategoryTransactions] = useState<Transaction[]>([])
+  const [loadingTransactions, setLoadingTransactions] = useState(false)
   const { toast } = useToast()
 
   useEffect(() => {
@@ -73,6 +77,53 @@ export default function Dashboard() {
       style: "currency",
       currency: "LKR",
     }).format(amount)
+  }
+  
+  const formatDate = (dateInput: string | Date) => {
+    const date = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
+    return date.toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    })
+  }
+  
+  const toggleCategory = async (categoryId: string) => {
+    if (expandedCategory === categoryId) {
+      // If already expanded, collapse it
+      setExpandedCategory(null);
+      setCategoryTransactions([]);
+      return;
+    }
+    
+    // Otherwise, expand it and load transactions
+    setExpandedCategory(categoryId);
+    setLoadingTransactions(true);
+    
+    try {
+      let transactions;
+      if (timeRange === 'custom' && startDate && endDate) {
+        transactions = await getTransactionsByCategory(
+          categoryId, 
+          timeRange, 
+          startDate.toISOString(), 
+          endDate.toISOString()
+        );
+      } else {
+        transactions = await getTransactionsByCategory(categoryId, timeRange);
+      }
+      
+      setCategoryTransactions(transactions);
+    } catch (error) {
+      console.error('Error loading category transactions:', error);
+      toast({
+        title: "Error loading transactions",
+        description: "Failed to load transactions for this category.",
+        variant: "destructive",
+      });
+    } finally {
+      setLoadingTransactions(false);
+    }
   }
 
   if (loading) {
@@ -298,19 +349,86 @@ export default function Dashboard() {
                   <TableHead>Category</TableHead>
                   <TableHead className="text-right">Amount</TableHead>
                   <TableHead className="text-right">% of Total</TableHead>
+                  <TableHead className="w-[50px]"></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {summary.expensesByCategory
                   .sort((a, b) => b.amount - a.amount) // Sort by amount in descending order
                   .map((category, index) => (
-                    <TableRow key={index}>
-                      <TableCell className="font-medium">{category.category}</TableCell>
-                      <TableCell className="text-right">{formatCurrency(category.amount)}</TableCell>
-                      <TableCell className="text-right">
-                        {((category.amount / summary.totalExpenses) * 100).toFixed(1)}%
-                      </TableCell>
-                    </TableRow>
+                    <>
+                      <TableRow 
+                        key={`category-${index}`} 
+                        className={"cursor-pointer hover:bg-muted/50 "}
+                        onClick={() => toggleCategory(category.category.toLowerCase())}
+                      >
+                        <TableCell className="font-medium">{category.category}</TableCell>
+                        <TableCell className="text-right">{formatCurrency(category.amount)}</TableCell>
+                        <TableCell className="text-right">
+                          {((category.amount / summary.totalExpenses) * 100).toFixed(1)}%
+                        </TableCell>
+                        <TableCell>
+                          {expandedCategory === category.category.toLowerCase() ? (
+                            <ChevronUpIcon className="h-4 w-4" />
+                          ) : (
+                            <ChevronDownIcon className="h-4 w-4" />
+                          )}
+                        </TableCell>
+                      </TableRow>
+                      
+                      {/* Expanded transactions view */}
+                      {expandedCategory === category.category.toLowerCase() && (
+                        <TableRow key={`transactions-${index}`}>
+                          <TableCell colSpan={4} className="p-0">
+                            <div className="bg-muted/30 px-4 py-2">
+                              <div className="font-medium mb-2 flex items-center justify-between">
+                                <span>Transactions in {category.category}</span>
+                                <Badge variant="outline">{categoryTransactions.length} items</Badge>
+                              </div>
+                              
+                              {loadingTransactions ? (
+                                <div className="text-center py-4">Loading transactions...</div>
+                              ) : categoryTransactions.length === 0 ? (
+                                <div className="text-center py-4 text-muted-foreground">No transactions found in this category</div>
+                              ) : (
+                                <div className="max-h-[300px] overflow-y-auto">
+                                  <Table>
+                                    <TableHeader>
+                                      <TableRow>
+                                        <TableHead>Date</TableHead>
+                                        <TableHead>Description</TableHead>
+                                        <TableHead className="text-right">Amount</TableHead>
+                                      </TableRow>
+                                    </TableHeader>
+                                    <TableBody>
+                                      {categoryTransactions.map((transaction) => (
+                                        <TableRow key={transaction.id}>
+                                          <TableCell>{formatDate(transaction.date)}</TableCell>
+                                          <TableCell>{transaction.description}</TableCell>
+                                          <TableCell className={`text-right font-medium ${transaction.amount > 0 ? "text-green-600" : "text-red-600"}`}>
+                                            {transaction.amount > 0 ? (
+                                              <span className="flex items-center justify-end">
+                                                <ArrowUpIcon className="h-3 w-3 mr-1" />
+                                                {formatCurrency(transaction.amount)}
+                                              </span>
+                                            ) : (
+                                              <span className="flex items-center justify-end">
+                                                <ArrowDownIcon className="h-3 w-3 mr-1" />
+                                                {formatCurrency(Math.abs(transaction.amount))}
+                                              </span>
+                                            )}
+                                          </TableCell>
+                                        </TableRow>
+                                      ))}
+                                    </TableBody>
+                                  </Table>
+                                </div>
+                              )}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </>
                   ))}
               </TableBody>
             </Table>

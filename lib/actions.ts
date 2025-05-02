@@ -271,6 +271,20 @@ export async function deleteTransaction(transactionId: string): Promise<void> {
   revalidatePath("/")
 }
 
+export async function deleteMultipleTransactions(transactionIds: string[]): Promise<void> {
+  if (!transactionIds.length) return;
+  
+  await prisma.transaction.deleteMany({
+    where: {
+      id: {
+        in: transactionIds
+      }
+    }
+  })
+
+  revalidatePath("/")
+}
+
 export async function deleteTransactionsByAccount(accountId: string): Promise<void> {
   await prisma.transaction.deleteMany({
     where: { accountId }
@@ -383,6 +397,67 @@ export async function clearAllData(): Promise<void> {
   ])
 
   revalidatePath("/")
+}
+
+export async function getTransactionsByCategory(categoryId: string, timeRange: string, customStartDate?: string, customEndDate?: string) {
+  try {
+    const now = new Date()
+    let startDate: Date
+    let endDate: Date = now
+
+    // Set date ranges based on time range
+    switch (timeRange) {
+      case 'custom':
+        if (customStartDate && customEndDate) {
+          startDate = new Date(customStartDate)
+          endDate = new Date(customEndDate)
+          endDate.setHours(23, 59, 59, 999) // Include the entire end day
+        } else {
+          startDate = new Date(now.getFullYear(), now.getMonth(), 1)
+        }
+        break
+      case 'month':
+        startDate = new Date(now.getFullYear(), now.getMonth(), 1)
+        break
+      case 'quarter':
+        startDate = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1)
+        break
+      case 'year':
+        startDate = new Date(now.getFullYear(), 0, 1)
+        break
+      case 'all':
+        startDate = new Date(2000, 0, 1)
+        break
+      default:
+        startDate = new Date(now.getFullYear(), now.getMonth(), 1)
+    }
+
+    // Query for transactions in the specified category and date range
+    let whereClause = {}
+    
+    if (timeRange === 'all') {
+      whereClause = { categoryId }
+    } else {
+      whereClause = {
+        categoryId,
+        date: {
+          gte: startDate,
+          lte: endDate
+        }
+      }
+    }
+
+    const transactions = await prisma.transaction.findMany({
+      where: whereClause,
+      orderBy: { date: 'desc' },
+      include: { category: true }
+    })
+
+    return transactions
+  } catch (error) {
+    console.error('Error fetching transactions by category:', error)
+    throw error
+  }
 }
 
 export async function getTransactionSummary(timeRange: string, customStartDate?: string, customEndDate?: string): Promise<TransactionSummary> {
@@ -733,11 +808,24 @@ function parseStatement(csvContent: string, fileName: string = ""): Transaction[
             try {
               date = new Date(record[dateField])
               if (isNaN(date.getTime())) {
-                const dateMatch = record[dateField].match(/(\d{2})[/-](\d{2})[/-](\d{2,4})/)
+                // Check for date formats with and without year
+                let dateMatch = record[dateField].match(/(\d{2})[/-](\d{2})[/-](\d{2,4})/)
+                
+                // If no year in the format, try matching just day and month
+                if (!dateMatch) {
+                  dateMatch = record[dateField].match(/(\d{2})[/-](\d{2})/)
+                }
+                
                 if (dateMatch) {
-                  const [, day, month, year] = dateMatch
-                  const fullYear = year.length === 2 ? '20' + year : year
-                  date = new Date(`${fullYear}-${month}-${day}`)
+                  const day = dateMatch[1]
+                  const month = dateMatch[2]
+                  
+                  // If we have a year in the match, use it; otherwise use current year
+                  const year = dateMatch[3] ? 
+                    (dateMatch[3].length === 2 ? '20' + dateMatch[3] : dateMatch[3]) : 
+                    new Date().getFullYear().toString()
+                  
+                  date = new Date(`${year}-${month}-${day}`)
                 }
               }
             } catch (e) {
@@ -804,7 +892,14 @@ function parseStatement(csvContent: string, fileName: string = ""): Transaction[
           return
         }
 
-        const dateMatch = line.match(/(\d{2})[/-](\d{2})[/-](\d{2,4})/)
+        // Try to match date with year first
+        let dateMatch = line.match(/(\d{2})[/-](\d{2})[/-](\d{2,4})/)
+        
+        // If no match with year, try matching just day and month
+        if (!dateMatch) {
+          dateMatch = line.match(/(\d{2})[/-](\d{2})/)
+        }
+        
         if (dateMatch) {
           const descriptionLine = lines[i + 1] || ""
           const amountLine = lines[i + 2] || ""
@@ -821,7 +916,13 @@ function parseStatement(csvContent: string, fileName: string = ""): Transaction[
 
             transactions.push({
               id: `tx-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-              date: new Date(`20${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]}`).toISOString(),
+              date: new Date(
+                // If we have a year (dateMatch[3]), use it (with 20 prefix if it's 2 digits)
+                // Otherwise use the current year
+                dateMatch[3] ? 
+                  `${dateMatch[3].length === 2 ? '20' + dateMatch[3] : dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]}` : 
+                  `${new Date().getFullYear()}-${dateMatch[2]}-${dateMatch[1]}`
+              ).toISOString(),
               description,
               amount: isCredit ? Math.abs(amount) : -Math.abs(amount),
               categoryId: null,
