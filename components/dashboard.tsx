@@ -37,6 +37,8 @@ export default function Dashboard() {
   const [startDate, setStartDate] = useState<Date | undefined>(undefined)
   const [endDate, setEndDate] = useState<Date | undefined>(undefined)
   const [showCustomDateRange, setShowCustomDateRange] = useState(false)
+  const [selectedMonth, setSelectedMonth] = useState<number>(new Date().getMonth())
+  const [selectedYear, setSelectedYear] = useState<number>(new Date().getFullYear())
   const [expandedCategory, setExpandedCategory] = useState<string | null>(null)
   const [categoryTransactions, setCategoryTransactions] = useState<Transaction[]>([])
   const [loadingTransactions, setLoadingTransactions] = useState(false)
@@ -50,11 +52,20 @@ export default function Dashboard() {
     setLoading(true)
     try {
       let data;
-      if (timeRange === 'custom' && startDate && endDate) {
-        // Format dates as ISO strings for the API
-        const startDateStr = startDate.toISOString();
-        const endDateStr = endDate.toISOString();
-        data = await getTransactionSummary(timeRange, startDateStr, endDateStr);
+      if (timeRange === 'custom') {
+        if (startDate && endDate) {
+          // Format dates as ISO strings for the API
+          const startDateStr = startDate.toISOString();
+          const endDateStr = endDate.toISOString();
+          data = await getTransactionSummary(timeRange, startDateStr, endDateStr);
+        } else {
+          // Use selected month and year
+          const startDateObj = new Date(selectedYear, selectedMonth, 1);
+          const endDateObj = new Date(selectedYear, selectedMonth + 1, 0); // Last day of month
+          const startDateStr = startDateObj.toISOString();
+          const endDateStr = endDateObj.toISOString();
+          data = await getTransactionSummary(timeRange, startDateStr, endDateStr);
+        }
       } else {
         data = await getTransactionSummary(timeRange);
       }
@@ -172,60 +183,127 @@ export default function Dashboard() {
           
           {showCustomDateRange && (
             <div className="flex items-center gap-2 mt-2 sm:mt-0">
-              <div className="grid gap-2">
-                <Popover>
-                  <PopoverTrigger asChild>
-                    <Button
-                      variant="outline"
-                      className={cn(
-                        "w-[130px] justify-start text-left font-normal",
-                        !startDate && "text-muted-foreground"
-                      )}
-                    >
-                      <CalendarIcon className="mr-2 h-4 w-4" />
-                      {startDate ? format(startDate, "PPP") : <span>Pick a date</span>}
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-auto p-0" align="start">
-                    <Calendar
-                      mode="single"
-                      selected={startDate}
-                      onSelect={setStartDate}
-                      initialFocus
-                    />
-                  </PopoverContent>
-                </Popover>
-              </div>
+              {/* Month Selector */}
+              <Select 
+                value={selectedMonth.toString()} 
+                onValueChange={(value) => setSelectedMonth(parseInt(value))}
+              >
+                <SelectTrigger className="w-[120px]">
+                  <SelectValue placeholder="Month" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="0">January</SelectItem>
+                  <SelectItem value="1">February</SelectItem>
+                  <SelectItem value="2">March</SelectItem>
+                  <SelectItem value="3">April</SelectItem>
+                  <SelectItem value="4">May</SelectItem>
+                  <SelectItem value="5">June</SelectItem>
+                  <SelectItem value="6">July</SelectItem>
+                  <SelectItem value="7">August</SelectItem>
+                  <SelectItem value="8">September</SelectItem>
+                  <SelectItem value="9">October</SelectItem>
+                  <SelectItem value="10">November</SelectItem>
+                  <SelectItem value="11">December</SelectItem>
+                </SelectContent>
+              </Select>
               
-              <span>to</span>
-              
-              <div className="grid gap-2">
-                <Popover>
-                  <PopoverTrigger asChild>
-                    <Button
-                      variant="outline"
-                      className={cn(
-                        "w-[130px] justify-start text-left font-normal",
-                        !endDate && "text-muted-foreground"
-                      )}
-                    >
-                      <CalendarIcon className="mr-2 h-4 w-4" />
-                      {endDate ? format(endDate, "PPP") : <span>Pick a date</span>}
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-auto p-0" align="start">
-                    <Calendar
-                      mode="single"
-                      selected={endDate}
-                      onSelect={setEndDate}
-                      initialFocus
-                      disabled={(date) => startDate ? date < startDate : false}
-                    />
-                  </PopoverContent>
-                </Popover>
-              </div>
+              {/* Year Selector */}
+              <Select 
+                value={selectedYear.toString()} 
+                onValueChange={(value) => setSelectedYear(parseInt(value))}
+              >
+                <SelectTrigger className="w-[100px]">
+                  <SelectValue placeholder="Year" />
+                </SelectTrigger>
+                <SelectContent>
+                  {Array.from({ length: 6 }, (_, i) => new Date().getFullYear() - 2 + i).map(year => (
+                    <SelectItem key={year} value={year.toString()}>
+                      {year}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
               
               <Button onClick={loadSummary} size="sm">Apply</Button>
+              
+              {/* Advanced Date Range Toggle */}
+              <Button 
+                variant="outline" 
+                size="sm"
+                onClick={() => {
+                  // Toggle between month/year selector and specific date picker
+                  if (startDate && endDate) {
+                    setStartDate(undefined);
+                    setEndDate(undefined);
+                  } else {
+                    // Initialize with first and last day of selected month
+                    setStartDate(new Date(selectedYear, selectedMonth, 1));
+                    setEndDate(new Date(selectedYear, selectedMonth + 1, 0));
+                  }
+                }}
+              >
+                {startDate && endDate ? "Use Month/Year" : "Use Specific Dates"}
+              </Button>
+              
+              {/* Show date pickers if specific dates are being used */}
+              {startDate && endDate && (
+                <div className="flex items-center gap-2 mt-2 sm:mt-0">
+                  <div className="grid gap-2">
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <Button
+                          variant="outline"
+                          className={cn(
+                            "w-[130px] justify-start text-left font-normal",
+                            !startDate && "text-muted-foreground"
+                          )}
+                          size="sm"
+                        >
+                          <CalendarIcon className="mr-2 h-4 w-4" />
+                          {startDate ? format(startDate, "MMM d, yyyy") : <span>Start date</span>}
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent className="w-auto p-0" align="start">
+                        <Calendar
+                          mode="single"
+                          selected={startDate}
+                          onSelect={setStartDate}
+                          initialFocus
+                        />
+                      </PopoverContent>
+                    </Popover>
+                  </div>
+                  
+                  <span>to</span>
+                  
+                  <div className="grid gap-2">
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <Button
+                          variant="outline"
+                          className={cn(
+                            "w-[130px] justify-start text-left font-normal",
+                            !endDate && "text-muted-foreground"
+                          )}
+                          size="sm"
+                        >
+                          <CalendarIcon className="mr-2 h-4 w-4" />
+                          {endDate ? format(endDate, "MMM d, yyyy") : <span>End date</span>}
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent className="w-auto p-0" align="start">
+                        <Calendar
+                          mode="single"
+                          selected={endDate}
+                          onSelect={setEndDate}
+                          initialFocus
+                          disabled={(date) => startDate ? date < startDate : false}
+                        />
+                      </PopoverContent>
+                    </Popover>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
