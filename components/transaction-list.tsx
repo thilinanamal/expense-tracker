@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { ArrowDownIcon, ArrowUpIcon, SearchIcon, FilterIcon, Trash2Icon } from "lucide-react"
+import { ArrowDownIcon, ArrowUpIcon, SearchIcon, FilterIcon, Trash2Icon, CalendarIcon, CheckIcon, CheckSquareIcon, SquareIcon } from "lucide-react"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
@@ -16,7 +16,11 @@ import {
 } from "@/components/ui/dialog"
 import { Badge } from "@/components/ui/badge"
 import { useToast } from "@/components/ui/use-toast"
-import { getTransactions, updateTransactionCategory, deleteTransaction, deleteTransactionsByAccount } from "@/lib/actions"
+import { Calendar } from "@/components/ui/calendar"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { format } from "date-fns"
+import { cn } from "@/lib/utils"
+import { getTransactions, updateTransactionCategory, deleteTransaction, deleteTransactionsByAccount, deleteMultipleTransactions } from "@/lib/actions"
 import type { Transaction, Category } from "@/lib/types"
 
 const CATEGORIES: Category[] = [
@@ -39,10 +43,17 @@ export default function TransactionList() {
   const [searchTerm, setSearchTerm] = useState("")
   const [categoryFilter, setCategoryFilter] = useState<string>("all")
   const [accountFilter, setAccountFilter] = useState<string>("all")
+  const [dateFilter, setDateFilter] = useState<string>("all")
+  const [startDate, setStartDate] = useState<Date | undefined>(undefined)
+  const [endDate, setEndDate] = useState<Date | undefined>(undefined)
+  const [showCustomDateRange, setShowCustomDateRange] = useState(false)
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const [deleteAccountDialogOpen, setDeleteAccountDialogOpen] = useState(false)
+  const [deleteMultipleDialogOpen, setDeleteMultipleDialogOpen] = useState(false)
   const [transactionToDelete, setTransactionToDelete] = useState<string | null>(null)
   const [accountToDelete, setAccountToDelete] = useState<string | null>(null)
+  const [selectedTransactions, setSelectedTransactions] = useState<Set<string>>(new Set())
+  const [selectMode, setSelectMode] = useState(false)
   const { toast } = useToast()
 
   // Format account number for display
@@ -66,6 +77,9 @@ export default function TransactionList() {
     try {
       const data = await getTransactions()
       setTransactions(data)
+      // Reset selection when reloading transactions
+      setSelectedTransactions(new Set())
+      setSelectMode(false)
     } catch (error) {
       toast({
         title: "Error loading transactions",
@@ -74,6 +88,62 @@ export default function TransactionList() {
       })
     } finally {
       setLoading(false)
+    }
+  }
+
+  const toggleSelectMode = () => {
+    setSelectMode(!selectMode)
+    // Clear selections when toggling mode
+    setSelectedTransactions(new Set())
+  }
+
+  const toggleSelectTransaction = (transactionId: string) => {
+    const newSelected = new Set(selectedTransactions)
+    if (newSelected.has(transactionId)) {
+      newSelected.delete(transactionId)
+    } else {
+      newSelected.add(transactionId)
+    }
+    setSelectedTransactions(newSelected)
+  }
+
+  const selectAllTransactions = () => {
+    const allIds = filteredTransactions.map(t => t.id)
+    setSelectedTransactions(new Set(allIds))
+  }
+
+  const deselectAllTransactions = () => {
+    setSelectedTransactions(new Set())
+  }
+
+  const confirmDeleteMultiple = () => {
+    if (selectedTransactions.size === 0) return
+    setDeleteMultipleDialogOpen(true)
+  }
+
+  const handleDeleteMultiple = async () => {
+    if (selectedTransactions.size === 0) return
+
+    try {
+      await deleteMultipleTransactions(Array.from(selectedTransactions))
+
+      // Update local state
+      setTransactions((prev) => prev.filter((t) => !selectedTransactions.has(t.id)))
+      setSelectedTransactions(new Set())
+      setSelectMode(false)
+
+      toast({
+        title: "Transactions deleted",
+        description: `Successfully deleted ${selectedTransactions.size} transactions`,
+      })
+    } catch (error) {
+      toast({
+        title: "Delete failed",
+        description: "Failed to delete the selected transactions",
+        variant: "destructive",
+      })
+    } finally {
+      setDeleteMultipleDialogOpen(false)
     }
   }
 
@@ -157,11 +227,94 @@ export default function TransactionList() {
     }
   }
 
+  // Filter transactions by date range
+  const isInDateRange = (date: string | Date) => {
+    if (dateFilter === 'all') return true;
+    
+    // Ensure we're working with a proper Date object
+    const transactionDate = new Date(date);
+    const now = new Date();
+    
+    // Log for debugging
+    // console.log('Checking date:', transactionDate.toISOString(), 'for filter:', dateFilter);
+    
+    switch (dateFilter) {
+      case 'today':
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        return transactionDate >= today;
+      
+      case 'week':
+        const weekStart = new Date();
+        weekStart.setDate(now.getDate() - now.getDay()); // Start of current week (Sunday)
+        weekStart.setHours(0, 0, 0, 0);
+        return transactionDate >= weekStart;
+      
+      case 'month':
+        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+        return transactionDate >= monthStart;
+      
+      case 'custom':
+        if (!startDate) return true;
+        
+        // Create date objects for comparison and normalize them to start/end of day
+        const start = new Date(startDate);
+        start.setHours(0, 0, 0, 0);
+        
+        if (endDate) {
+          const end = new Date(endDate);
+          end.setHours(23, 59, 59, 999);
+          
+          // Get date components for better comparison
+          const txYear = transactionDate.getFullYear();
+          const txMonth = transactionDate.getMonth();
+          const txDay = transactionDate.getDate();
+          
+          const startYear = start.getFullYear();
+          const startMonth = start.getMonth();
+          const startDay = start.getDate();
+          
+          const endYear = end.getFullYear();
+          const endMonth = end.getMonth();
+          const endDay = end.getDate();
+          
+          // Compare date components instead of timestamp
+          const isAfterOrEqualStart = 
+            (txYear > startYear) || 
+            (txYear === startYear && txMonth > startMonth) || 
+            (txYear === startYear && txMonth === startMonth && txDay >= startDay);
+          
+          const isBeforeOrEqualEnd = 
+            (txYear < endYear) || 
+            (txYear === endYear && txMonth < endMonth) || 
+            (txYear === endYear && txMonth === endMonth && txDay <= endDay);
+          
+          return isAfterOrEqualStart && isBeforeOrEqualEnd;
+        }
+        
+        return transactionDate >= start;
+      
+      default:
+        return true;
+    }
+  };
+
   const filteredTransactions = transactions.filter((transaction) => {
     const matchesSearch = transaction.description.toLowerCase().includes(searchTerm.toLowerCase())
-    const matchesCategory = categoryFilter === "all" || transaction.categoryId === categoryFilter
-    const matchesAccount = accountFilter === "all" || transaction.accountId === accountFilter
-    return matchesSearch && matchesCategory && matchesAccount
+    
+    // Handle special category filters
+    let matchesCategory = false;
+    if (categoryFilter === 'all') {
+      matchesCategory = true;
+    } else if (categoryFilter === 'uncategorized') {
+      matchesCategory = transaction.categoryId === null;
+    } else {
+      matchesCategory = transaction.categoryId === categoryFilter;
+    }
+    
+    const matchesAccount = accountFilter === 'all' || transaction.accountId === accountFilter
+    const matchesDate = isInDateRange(transaction.date)
+    return matchesSearch && matchesCategory && matchesAccount && matchesDate
   })
 
   const getCategoryBadge = (categoryId: string | null) => {
@@ -211,9 +364,11 @@ export default function TransactionList() {
             onChange={(e) => setSearchTerm(e.target.value)}
           />
         </div>
-        <div className="flex items-center gap-2 w-full sm:w-auto">
+        
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+          {/* Account Filter */}
           <Select value={accountFilter} onValueChange={(value) => setAccountFilter(value)}>
-            <SelectTrigger className="w-full sm:w-[180px]">
+            <SelectTrigger className="w-full sm:w-[150px]">
               <SelectValue placeholder="All Accounts" />
             </SelectTrigger>
             <SelectContent>
@@ -237,12 +392,14 @@ export default function TransactionList() {
             </Button>
           )}
 
+          {/* Category Filter */}
           <Select value={categoryFilter} onValueChange={(value) => setCategoryFilter(value)}>
-            <SelectTrigger className="w-full sm:w-[180px]">
+            <SelectTrigger className="w-full sm:w-[150px]">
               <SelectValue placeholder="All Categories" />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All Categories</SelectItem>
+              <SelectItem value="uncategorized">Uncategorized</SelectItem>
               {CATEGORIES.map((category) => (
                 <SelectItem key={category.id} value={category.id}>
                   {category.name}
@@ -251,6 +408,94 @@ export default function TransactionList() {
             </SelectContent>
           </Select>
 
+          {/* Date Filter */}
+          <Select value={dateFilter} onValueChange={(value) => {
+            setDateFilter(value);
+            if (value === 'custom') {
+              setShowCustomDateRange(true);
+              // Initialize with current month if not already set
+              if (!startDate) {
+                const now = new Date();
+                setStartDate(new Date(now.getFullYear(), now.getMonth(), 1));
+                setEndDate(new Date());
+              }
+            } else {
+              setShowCustomDateRange(false);
+            }
+          }}>
+            <SelectTrigger className="w-full sm:w-[150px]">
+              <SelectValue placeholder="All Time" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Time</SelectItem>
+              <SelectItem value="today">Today</SelectItem>
+              <SelectItem value="week">This Week</SelectItem>
+              <SelectItem value="month">This Month</SelectItem>
+              <SelectItem value="custom">Custom Range</SelectItem>
+            </SelectContent>
+          </Select>
+          
+          {/* Custom Date Range */}
+          {showCustomDateRange && (
+            <div className="flex items-center gap-2 mt-2 sm:mt-0">
+              <div className="grid gap-2">
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      className={cn(
+                        "w-[130px] justify-start text-left font-normal",
+                        !startDate && "text-muted-foreground"
+                      )}
+                      size="sm"
+                    >
+                      <CalendarIcon className="mr-2 h-4 w-4" />
+                      {startDate ? format(startDate, "MMM d, yyyy") : <span>Start date</span>}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-0" align="start">
+                    <Calendar
+                      mode="single"
+                      selected={startDate}
+                      onSelect={setStartDate}
+                      initialFocus
+                    />
+                  </PopoverContent>
+                </Popover>
+              </div>
+              
+              <span>to</span>
+              
+              <div className="grid gap-2">
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      className={cn(
+                        "w-[130px] justify-start text-left font-normal",
+                        !endDate && "text-muted-foreground"
+                      )}
+                      size="sm"
+                    >
+                      <CalendarIcon className="mr-2 h-4 w-4" />
+                      {endDate ? format(endDate, "MMM d, yyyy") : <span>End date</span>}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-0" align="start">
+                    <Calendar
+                      mode="single"
+                      selected={endDate}
+                      onSelect={setEndDate}
+                      initialFocus
+                      disabled={(date) => startDate ? date < startDate : false}
+                    />
+                  </PopoverContent>
+                </Popover>
+              </div>
+            </div>
+          )}
+
+          {/* Reset Filters Button */}
           <Button
             variant="outline"
             size="icon"
@@ -258,10 +503,57 @@ export default function TransactionList() {
               setSearchTerm("")
               setCategoryFilter("all")
               setAccountFilter("all")
+              setDateFilter("all")
+              setShowCustomDateRange(false)
             }}
+            title="Reset all filters"
           >
             <FilterIcon className="h-4 w-4" />
           </Button>
+          
+          {/* Select Mode Toggle */}
+          <Button
+            variant={selectMode ? "default" : "outline"}
+            size="sm"
+            onClick={toggleSelectMode}
+            className="ml-2"
+          >
+            {selectMode ? "Cancel Selection" : "Select Multiple"}
+          </Button>
+          
+          {/* Delete Selected Button */}
+          {selectMode && selectedTransactions.size > 0 && (
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={confirmDeleteMultiple}
+            >
+              Delete Selected ({selectedTransactions.size})
+            </Button>
+          )}
+          
+          {/* Select All / Deselect All Buttons */}
+          {selectMode && filteredTransactions.length > 0 && (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={selectAllTransactions}
+              >
+                Select All
+              </Button>
+              
+              {selectedTransactions.size > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={deselectAllTransactions}
+                >
+                  Deselect All
+                </Button>
+              )}
+            </>
+          )}
         </div>
       </div>
 
@@ -274,17 +566,37 @@ export default function TransactionList() {
           <Table>
             <TableHeader>
               <TableRow>
+                {selectMode && <TableHead className="w-[40px]"></TableHead>}
                 <TableHead>Date</TableHead>
                 <TableHead>Account</TableHead>
                 <TableHead>Description</TableHead>
                 <TableHead>Category</TableHead>
                 <TableHead className="text-right">Amount</TableHead>
-                <TableHead className="w-[80px]"></TableHead>
+                {!selectMode && <TableHead className="w-[80px]"></TableHead>}
               </TableRow>
             </TableHeader>
             <TableBody>
               {filteredTransactions.map((transaction) => (
-                <TableRow key={transaction.id}>
+                <TableRow 
+                  key={transaction.id} 
+                  className={selectedTransactions.has(transaction.id) ? "bg-muted/50" : ""}
+                >
+                  {selectMode && (
+                    <TableCell className="w-[40px] p-2">
+                      <Button 
+                        variant="ghost" 
+                        size="icon" 
+                        className="h-6 w-6"
+                        onClick={() => toggleSelectTransaction(transaction.id)}
+                      >
+                        {selectedTransactions.has(transaction.id) ? (
+                          <CheckSquareIcon className="h-5 w-5" />
+                        ) : (
+                          <SquareIcon className="h-5 w-5" />
+                        )}
+                      </Button>
+                    </TableCell>
+                  )}
                   <TableCell>{formatDate(transaction.date)}</TableCell>
                   <TableCell>{formatAccountNumber(transaction.accountId)}</TableCell>
                   <TableCell>{transaction.description}</TableCell>
@@ -324,11 +636,13 @@ export default function TransactionList() {
                       </span>
                     )}
                   </TableCell>
-                  <TableCell>
-                    <Button variant="ghost" size="icon" onClick={() => confirmDelete(transaction.id)}>
-                      <Trash2Icon className="h-4 w-4 text-muted-foreground" />
-                    </Button>
-                  </TableCell>
+                  {!selectMode && (
+                    <TableCell>
+                      <Button variant="ghost" size="icon" onClick={() => confirmDelete(transaction.id)}>
+                        <Trash2Icon className="h-4 w-4 text-muted-foreground" />
+                      </Button>
+                    </TableCell>
+                  )}
                 </TableRow>
               ))}
             </TableBody>
@@ -370,6 +684,26 @@ export default function TransactionList() {
             </Button>
             <Button variant="destructive" onClick={handleDeleteAccount}>
               Delete All
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={deleteMultipleDialogOpen} onOpenChange={setDeleteMultipleDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Multiple Transactions</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete {selectedTransactions.size} selected transactions? 
+              This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteMultipleDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleDeleteMultiple}>
+              Delete Selected
             </Button>
           </DialogFooter>
         </DialogContent>
