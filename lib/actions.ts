@@ -263,6 +263,35 @@ export async function updateTransactionCategory(transactionId: string, categoryI
   }
 }
 
+export async function updateTransactionDate(transactionId: string, newDateString: string): Promise<void> {
+  try {
+    console.log(`Updating transaction ${transactionId} with new date ${newDateString}`);
+    // The date string from <input type="date"> is YYYY-MM-DD.
+    // Prisma expects a Date object or an ISO string for DateTime fields.
+    const newDate = new Date(newDateString);
+
+    if (isNaN(newDate.getTime())) {
+      throw new Error("Invalid date format provided.");
+    }
+
+    const result = await prisma.transaction.update({
+      where: { id: transactionId },
+      data: { date: newDate }, // Prisma will handle UTC conversion
+    });
+
+    console.log('Date update successful:', result);
+    revalidatePath("/");
+  } catch (error) {
+    console.error('Error updating transaction date:', error);
+    // Optionally, find the transaction to see if it exists for debugging
+    const transaction = await prisma.transaction.findUnique({
+      where: { id: transactionId },
+    });
+    console.log('Transaction found for date update?', transaction);
+    throw error; // Re-throw the error to be caught by the client-side handler
+  }
+}
+
 export async function deleteTransaction(transactionId: string): Promise<void> {
   await prisma.transaction.delete({
     where: { id: transactionId }

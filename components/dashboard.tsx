@@ -113,13 +113,27 @@ export default function Dashboard() {
     
     try {
       let transactions;
-      if (timeRange === 'custom' && startDate && endDate) {
-        transactions = await getTransactionsByCategory(
-          categoryId, 
-          timeRange, 
-          startDate.toISOString(), 
-          endDate.toISOString()
-        );
+      if (timeRange === 'custom') {
+        if (startDate && endDate) {
+          // If explicit date range is selected
+          transactions = await getTransactionsByCategory(
+            categoryId, 
+            timeRange, 
+            startDate.toISOString(), 
+            endDate.toISOString()
+          );
+        } else {
+          // If month and year filter mode is used
+          const startDateObj = new Date(selectedYear, selectedMonth, 1);
+          const endDateObj = new Date(selectedYear, selectedMonth + 1, 0); // Last day of month
+          
+          transactions = await getTransactionsByCategory(
+            categoryId,
+            timeRange,
+            startDateObj.toISOString(),
+            endDateObj.toISOString()
+          );
+        }
       } else {
         transactions = await getTransactionsByCategory(categoryId, timeRange);
       }

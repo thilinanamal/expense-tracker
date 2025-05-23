@@ -20,7 +20,7 @@ import { Calendar } from "@/components/ui/calendar"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { format } from "date-fns"
 import { cn } from "@/lib/utils"
-import { getTransactions, updateTransactionCategory, deleteTransaction, deleteTransactionsByAccount, deleteMultipleTransactions } from "@/lib/actions"
+import { getTransactions, updateTransactionCategory, deleteTransaction, deleteTransactionsByAccount, deleteMultipleTransactions, updateTransactionDate } from "@/lib/actions"
 import type { Transaction, Category } from "@/lib/types"
 
 const CATEGORIES: Category[] = [
@@ -226,6 +226,41 @@ export default function TransactionList() {
       setAccountToDelete(null)
     }
   }
+
+  const handleDateChange = async (transactionId: string, newDateString: string) => {
+    console.log(`handleDateChange called for tx: ${transactionId}, newDate: ${newDateString}`);
+    try {
+      // Ensure the date string is in YYYY-MM-DD format, which <input type="date"> provides.
+      // The backend action (updateTransactionDate) will receive this string.
+      await updateTransactionDate(transactionId, newDateString);
+      console.log(`updateTransactionDate successful for tx: ${transactionId}`);
+
+      // Update local state. It's good practice to store dates in a consistent format,
+      // e.g., ISO string, if they are fetched/updated that way.
+      const updatedDateISO = new Date(newDateString).toISOString();
+      console.log(`Converted newDateString ${newDateString} to ISO: ${updatedDateISO}`);
+
+      setTransactions((prev) => {
+        const newTransactions = prev.map((t) =>
+          t.id === transactionId ? { ...t, date: updatedDateISO } : t
+        );
+        console.log("Updated transactions local state:", newTransactions.find(t => t.id === transactionId));
+        return newTransactions;
+      });
+
+      toast({
+        title: "Date updated",
+        description: "Transaction date has been updated successfully",
+      });
+    } catch (error) {
+      console.error(`Failed to update date for tx: ${transactionId}:`, error);
+      toast({
+        title: "Update failed",
+        description: "Failed to update transaction date. Please check console for details.",
+        variant: "destructive",
+      });
+    }
+  };
 
   // Filter transactions by date range
   const isInDateRange = (date: string | Date) => {
@@ -597,7 +632,51 @@ export default function TransactionList() {
                       </Button>
                     </TableCell>
                   )}
-                  <TableCell>{formatDate(transaction.date)}</TableCell>
+                  <TableCell>
+                    {/* Using standard HTML input for diagnostics */}
+                    <input
+                      key={`${transaction.id}-${transaction.date}-html`}
+                      type="date"
+                      defaultValue={(() => {
+                        try {
+                          if (transaction.date && new Date(transaction.date).toISOString()) {
+                            return new Date(transaction.date).toISOString().split('T')[0];
+                          }
+                          console.warn(`Invalid or missing date for transaction ${transaction.id}:`, transaction.date);
+                          return ''; // Fallback to empty if date is problematic
+                        } catch (error) {
+                          console.error(`Error processing date for transaction ${transaction.id}:`, transaction.date, error);
+                          return ''; // Fallback to empty on error
+                        }
+                      })()}
+                      onClick={() => {
+                        console.log(`HTML input onClick triggered for tx: ${transaction.id}`);
+                      }}
+                      onBlur={(e) => {
+                        console.log(`HTML input onBlur triggered for tx: ${transaction.id}, input value: ${e.target.value}`);
+                        let originalDateString = '';
+                        try {
+                          if (transaction.date && new Date(transaction.date).toISOString()) {
+                            originalDateString = new Date(transaction.date).toISOString().split('T')[0];
+                          }
+                        } catch (err) { /* ignore if original date was also problematic */ }
+
+                        if (e.target.value) {
+                          if (e.target.value !== originalDateString) {
+                            handleDateChange(transaction.id, e.target.value);
+                          }
+                        } else {
+                           toast({
+                            title: "Invalid Date",
+                            description: "Date cannot be empty.",
+                            variant: "destructive",
+                          });
+                          if (originalDateString) e.target.value = originalDateString; // Revert if possible
+                        }
+                      }}
+                      className="w-[150px] h-9 text-sm p-2 border rounded-md" // Basic styling
+                    />
+                  </TableCell>
                   <TableCell>{formatAccountNumber(transaction.accountId)}</TableCell>
                   <TableCell>{transaction.description}</TableCell>
                   <TableCell>
