@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache"
 import { parse } from "csv-parse/sync"
 import type { Transaction, TransactionSummary, StatementParseResult } from "./types"
+import { prisma } from "./db"
 
 // Mock database for demo purposes
 let transactions: Transaction[] = []
@@ -21,13 +22,14 @@ export async function processStatement(formData: FormData): Promise<StatementPar
       return { success: false, error: "Empty file content" }
     }
 
-    const fileName = file.name.toLowerCase()
+    // Extract filename without extension and sanitize it for use as account ID
+    const fileName = file.name.toLowerCase().replace(/\.[^/.]+$/, "").replace(/[^a-z0-9-]/g, "-")
+    console.log("Processing statement with filename:", fileName)
 
     let parsedTransactions: Transaction[] = []
 
     // First try to use LLM to parse the statement
     try {
-      // Check if Gemini API key is available
       if (!process.env.GEMINI_API_KEY) {
         console.warn("GEMINI_API_KEY not found in environment variables. Falling back to traditional parsing.")
         throw new Error("Gemini API key not configured")
@@ -35,55 +37,35 @@ export async function processStatement(formData: FormData): Promise<StatementPar
 
       parsedTransactions = await parseStatementWithGemini(fileContent, fileName)
 
-      // If LLM parsing returned transactions, use those
       if (parsedTransactions.length > 0) {
         console.log(`Successfully parsed ${parsedTransactions.length} transactions with Gemini`)
       } else {
-        // Fall back to traditional parsing methods
         console.log("Gemini parsing returned no transactions, falling back to traditional parsing")
-
-        if (fileName.includes("savings")) {
-          parsedTransactions = parseSavingsStatement(fileContent)
-        } else if (fileName.includes("amex")) {
-          parsedTransactions = parseAmexStatement(fileContent)
-        } else if (fileName.includes("sampath") || fileName.includes("credit")) {
-          parsedTransactions = parseSampathStatement(fileContent)
-        } else {
-          // Try generic CSV parsing
-          parsedTransactions = parseGenericStatement(fileContent)
-        }
+        parsedTransactions = parseStatement(fileContent, fileName)
       }
     } catch (llmError) {
       console.error("Error parsing with Gemini, falling back to traditional parsing:", llmError)
-
-      // Fall back to traditional parsing methods
-      if (fileName.includes("savings")) {
-        parsedTransactions = parseSavingsStatement(fileContent)
-      } else if (fileName.includes("amex")) {
-        parsedTransactions = parseAmexStatement(fileContent)
-      } else if (fileName.includes("sampath") || fileName.includes("credit")) {
-        parsedTransactions = parseSampathStatement(fileContent)
-      } else {
-        // Try generic CSV parsing
-        parsedTransactions = parseGenericStatement(fileContent)
-      }
+      parsedTransactions = parseStatement(fileContent, fileName)
     }
 
-    // Add to our mock database
+    // Ensure all transactions have the correct account ID
     const statementId = `statement-${Date.now()}`
-    const transactionsWithIds = parsedTransactions.map((t, index) => ({
+    const transactionsToInsert = parsedTransactions.map((t) => ({
       ...t,
-      id: `tx-${Date.now()}-${index}`,
+      accountId: t.accountId === "unknown-account" ? fileName : t.accountId,
       statementId,
     }))
 
-    transactions = [...transactions, ...transactionsWithIds]
+    // Insert transactions into the database
+    await prisma.transaction.createMany({
+      data: transactionsToInsert,
+    })
 
     revalidatePath("/")
 
     return {
       success: true,
-      transactionsCount: transactionsWithIds.length,
+      transactionsCount: transactionsToInsert.length,
     }
   } catch (error) {
     console.error("Error processing statement:", error)
@@ -248,468 +230,505 @@ ${truncatedContent}
 }
 
 export async function getTransactions(): Promise<Transaction[]> {
-  // In a real app, this would fetch from a database
-  return transactions.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+  const transactions = await prisma.transaction.findMany({
+    orderBy: { date: 'desc' },
+    include: { category: true }
+  })
+
+  return transactions.map(tx => ({
+    ...tx,
+    date: tx.date.toISOString()
+  }))
 }
 
 export async function updateTransactionCategory(transactionId: string, categoryId: string): Promise<void> {
-  // In a real app, this would update the database
-  transactions = transactions.map((t) => (t.id === transactionId ? { ...t, categoryId } : t))
+  try {
+    console.log(`Updating transaction ${transactionId} with category ${categoryId}`)
+    
+    const result = await prisma.transaction.update({
+      where: { id: transactionId },
+      data: { categoryId }
+    })
+    
+    console.log('Update successful:', result)
+    revalidatePath("/")
+  } catch (error) {
+    console.error('Error updating transaction category:', error)
+    // Try to find the transaction to see if it exists
+    const transaction = await prisma.transaction.findUnique({
+      where: { id: transactionId }
+    })
+    console.log('Transaction found?', transaction)
+    throw error
+  }
+}
+
+export async function updateTransactionDate(transactionId: string, newDateString: string): Promise<void> {
+  try {
+    console.log(`Updating transaction ${transactionId} with new date ${newDateString}`);
+    // The date string from <input type="date"> is YYYY-MM-DD.
+    // Prisma expects a Date object or an ISO string for DateTime fields.
+    const newDate = new Date(newDateString);
+
+    if (isNaN(newDate.getTime())) {
+      throw new Error("Invalid date format provided.");
+    }
+
+    const result = await prisma.transaction.update({
+      where: { id: transactionId },
+      data: { date: newDate }, // Prisma will handle UTC conversion
+    });
+
+    console.log('Date update successful:', result);
+    revalidatePath("/");
+  } catch (error) {
+    console.error('Error updating transaction date:', error);
+    // Optionally, find the transaction to see if it exists for debugging
+    const transaction = await prisma.transaction.findUnique({
+      where: { id: transactionId },
+    });
+    console.log('Transaction found for date update?', transaction);
+    throw error; // Re-throw the error to be caught by the client-side handler
+  }
+}
+
+export async function deleteTransaction(transactionId: string): Promise<void> {
+  await prisma.transaction.delete({
+    where: { id: transactionId }
+  })
 
   revalidatePath("/")
 }
 
-export async function deleteTransaction(transactionId: string): Promise<void> {
-  // In a real app, this would delete from the database
-  transactions = transactions.filter((t) => t.id !== transactionId)
+export async function deleteMultipleTransactions(transactionIds: string[]): Promise<void> {
+  if (!transactionIds.length) return;
+  
+  await prisma.transaction.deleteMany({
+    where: {
+      id: {
+        in: transactionIds
+      }
+    }
+  })
+
+  revalidatePath("/")
+}
+
+export async function deleteTransactionsByAccount(accountId: string): Promise<void> {
+  await prisma.transaction.deleteMany({
+    where: { accountId }
+  })
 
   revalidatePath("/")
 }
 
 export async function clearTransactionsByMonth(monthOption: string): Promise<void> {
-  // Get current date
   const now = new Date()
-  let cutoffDate: Date
+  let deleteCondition: any
 
   switch (monthOption) {
     case "current":
-      // Current month - keep transactions from this month
-      cutoffDate = new Date(now.getFullYear(), now.getMonth(), 1)
-      transactions = transactions.filter((t) => new Date(t.date) >= cutoffDate)
+      deleteCondition = {
+        date: {
+          lt: new Date(now.getFullYear(), now.getMonth(), 1)
+        }
+      }
       break
     case "previous":
-      // Previous month - remove transactions from previous month
       const previousMonth = now.getMonth() - 1
       const yearOfPreviousMonth = previousMonth < 0 ? now.getFullYear() - 1 : now.getFullYear()
       const normalizedPreviousMonth = previousMonth < 0 ? 11 : previousMonth
 
-      const startOfPreviousMonth = new Date(yearOfPreviousMonth, normalizedPreviousMonth, 1)
-      const startOfCurrentMonth = new Date(now.getFullYear(), now.getMonth(), 1)
-
-      transactions = transactions.filter((t) => {
-        const txDate = new Date(t.date)
-        return txDate < startOfPreviousMonth || txDate >= startOfCurrentMonth
-      })
+      deleteCondition = {
+        AND: [
+          {
+            date: {
+              gte: new Date(yearOfPreviousMonth, normalizedPreviousMonth, 1)
+            }
+          },
+          {
+            date: {
+              lt: new Date(now.getFullYear(), now.getMonth(), 1)
+            }
+          }
+        ]
+      }
       break
     case "2months":
-      // 2 months ago - remove transactions from 2 months ago
       const twoMonthsAgo = now.getMonth() - 2
       const yearOfTwoMonthsAgo = twoMonthsAgo < 0 ? now.getFullYear() - 1 : now.getFullYear()
       const normalizedTwoMonthsAgo = twoMonthsAgo < 0 ? 12 + twoMonthsAgo : twoMonthsAgo
 
-      const startOfTwoMonthsAgo = new Date(yearOfTwoMonthsAgo, normalizedTwoMonthsAgo, 1)
-      const endOfTwoMonthsAgo = new Date(yearOfTwoMonthsAgo, normalizedTwoMonthsAgo + 1, 0)
-
-      transactions = transactions.filter((t) => {
-        const txDate = new Date(t.date)
-        return txDate < startOfTwoMonthsAgo || txDate > endOfTwoMonthsAgo
-      })
+      deleteCondition = {
+        AND: [
+          {
+            date: {
+              gte: new Date(yearOfTwoMonthsAgo, normalizedTwoMonthsAgo, 1)
+            }
+          },
+          {
+            date: {
+              lt: new Date(yearOfTwoMonthsAgo, normalizedTwoMonthsAgo + 1, 1)
+            }
+          }
+        ]
+      }
       break
     case "3months":
-      // 3 months ago - remove transactions from 3 months ago
       const threeMonthsAgo = now.getMonth() - 3
       const yearOfThreeMonthsAgo = threeMonthsAgo < 0 ? now.getFullYear() - 1 : now.getFullYear()
       const normalizedThreeMonthsAgo = threeMonthsAgo < 0 ? 12 + threeMonthsAgo : threeMonthsAgo
 
-      const startOfThreeMonthsAgo = new Date(yearOfThreeMonthsAgo, normalizedThreeMonthsAgo, 1)
-      const endOfThreeMonthsAgo = new Date(yearOfThreeMonthsAgo, normalizedThreeMonthsAgo + 1, 0)
-
-      transactions = transactions.filter((t) => {
-        const txDate = new Date(t.date)
-        return txDate < startOfThreeMonthsAgo || txDate > endOfThreeMonthsAgo
-      })
+      deleteCondition = {
+        AND: [
+          {
+            date: {
+              gte: new Date(yearOfThreeMonthsAgo, normalizedThreeMonthsAgo, 1)
+            }
+          },
+          {
+            date: {
+              lt: new Date(yearOfThreeMonthsAgo, normalizedThreeMonthsAgo + 1, 1)
+            }
+          }
+        ]
+      }
       break
     case "older":
-      // Older than 3 months - keep only transactions from the last 3 months
-      cutoffDate = new Date()
+      const cutoffDate = new Date()
       cutoffDate.setMonth(cutoffDate.getMonth() - 3)
-      transactions = transactions.filter((t) => new Date(t.date) >= cutoffDate)
+      deleteCondition = {
+        date: {
+          lt: cutoffDate
+        }
+      }
       break
     default:
-      // Invalid option, do nothing
-      break
+      return
   }
+
+  await prisma.transaction.deleteMany({
+    where: deleteCondition
+  })
 
   revalidatePath("/")
 }
 
 export async function clearAllTransactions(): Promise<void> {
-  // Clear all transactions
-  transactions = []
-
+  await prisma.transaction.deleteMany()
   revalidatePath("/")
 }
 
 export async function clearAllData(): Promise<void> {
-  // Clear all data including transactions and any other data
-  transactions = []
-
-  // In a real app, this would also clear categories, settings, etc.
+  await prisma.$transaction([
+    prisma.transaction.deleteMany(),
+    prisma.category.deleteMany()
+  ])
 
   revalidatePath("/")
 }
 
-export async function getTransactionSummary(timeRange: string): Promise<TransactionSummary> {
-  // In a real app, this would calculate from database data
-  // For demo purposes, we'll generate some mock summary data
-
-  const totalIncome = transactions.filter((t) => t.amount > 0).reduce((sum, t) => sum + t.amount, 0)
-
-  const totalExpenses = Math.abs(transactions.filter((t) => t.amount < 0).reduce((sum, t) => sum + t.amount, 0))
-
-  const netBalance = totalIncome - totalExpenses
-  const savingsRate = totalIncome > 0 ? (netBalance / totalIncome) * 100 : 0
-
-  // Mock category data
-  const expensesByCategory = [
-    { category: "Groceries", amount: totalExpenses * 0.25 },
-    { category: "Dining", amount: totalExpenses * 0.15 },
-    { category: "Shopping", amount: totalExpenses * 0.2 },
-    { category: "Transportation", amount: totalExpenses * 0.1 },
-    { category: "Utilities", amount: totalExpenses * 0.15 },
-    { category: "Healthcare", amount: totalExpenses * 0.05 },
-    { category: "Other", amount: totalExpenses * 0.1 },
-  ]
-
-  // Mock monthly data
-  const monthlyData = [
-    { month: "Jan", income: 450000, expenses: 320000 },
-    { month: "Feb", income: 420000, expenses: 340000 },
-    { month: "Mar", income: 480000, expenses: 310000 },
-    { month: "Apr", income: 430000, expenses: 360000 },
-    { month: "May", income: 470000, expenses: 330000 },
-    { month: "Jun", income: 440000, expenses: 350000 },
-  ]
-
-  return {
-    totalIncome,
-    totalExpenses,
-    netBalance,
-    incomeChange: 5.2,
-    expenseChange: -2.8,
-    savingsRate,
-    expensesByCategory,
-    monthlyData,
-  }
-}
-
-// Helper functions to parse different statement formats
-function parseSavingsStatement(csvContent: string): Transaction[] {
+export async function getTransactionsByCategory(categoryId: string, timeRange: string, customStartDate?: string, customEndDate?: string) {
   try {
-    const records = parse(csvContent, {
-      columns: true,
-      skip_empty_lines: true,
-      relax_column_count: true,
-      skip_records_with_error: true,
-      trim: true,
+    const now = new Date()
+    let startDate: Date
+    let endDate: Date = now
+
+    // Set date ranges based on time range
+    switch (timeRange) {
+      case 'custom':
+        if (customStartDate && customEndDate) {
+          startDate = new Date(customStartDate)
+          endDate = new Date(customEndDate)
+          endDate.setHours(23, 59, 59, 999) // Include the entire end day
+        } else {
+          startDate = new Date(now.getFullYear(), now.getMonth(), 1)
+        }
+        break
+      case 'month':
+        startDate = new Date(now.getFullYear(), now.getMonth(), 1)
+        break
+      case 'quarter':
+        startDate = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1)
+        break
+      case 'year':
+        startDate = new Date(now.getFullYear(), 0, 1)
+        break
+      case 'all':
+        startDate = new Date(2000, 0, 1)
+        break
+      default:
+        startDate = new Date(now.getFullYear(), now.getMonth(), 1)
+    }
+
+    // Query for transactions in the specified category and date range
+    let whereClause = {}
+    
+    if (timeRange === 'all') {
+      whereClause = { categoryId }
+    } else {
+      whereClause = {
+        categoryId,
+        date: {
+          gte: startDate,
+          lte: endDate
+        }
+      }
+    }
+
+    const transactions = await prisma.transaction.findMany({
+      where: whereClause,
+      orderBy: { date: 'desc' },
+      include: { category: true }
     })
-
-    return records
-      .map((record: any) => {
-        // Look for account number in common field names
-        const accountField = findField(record, [
-          "Account No",
-          "Account Number",
-          "AccountNumber",
-          "Account",
-          "acc_no",
-          "account_no"
-        ])
-        
-        // Get the account number, falling back to first column if no match
-        const accountNumber = record[accountField] || Object.values(record)[0] || "unknown-account"
-
-        const isDeposit = record.Deposits && Number.parseFloat(record.Deposits) > 0
-        const isWithdrawal = record.Withdrawals && Number.parseFloat(record.Withdrawals) > 0
-
-        // Extract date from description or use current date
-        const dateMatch = record.Deposits?.match(/\d{2}-\d{2}-\d{4}/) || record.Withdrawals?.match(/\d{2}-\d{2}-\d{4}/)
-        const date = dateMatch ? new Date(dateMatch[0]) : new Date()
-
-        return {
-          date: date.toISOString(),
-          description: record.Deposits || record.Withdrawals || "Unknown transaction",
-          amount: isDeposit
-            ? Number.parseFloat(record.Deposits)
-            : isWithdrawal
-              ? -Number.parseFloat(record.Withdrawals)
-              : 0,
-          categoryId: null,
-          accountId: accountNumber.toString().trim(),
-        }
-      })
-      .filter((tx: Transaction) => tx.amount !== 0)
-  } catch (error) {
-    console.error("Error parsing savings statement:", error)
-    return []
-  }
-}
-
-function parseAmexStatement(csvContent: string): Transaction[] {
-  try {
-    // Check if content is defined and is a string
-    if (!csvContent || typeof csvContent !== "string") {
-      console.error("Invalid content provided to parseAmexStatement")
-      return []
-    }
-
-    // Make CSV parsing more flexible to handle inconsistent column counts
-    const records = parse(csvContent, {
-      columns: true,
-      skip_empty_lines: true,
-      relax_column_count: true, // Allow rows with fewer columns
-      skip_records_with_error: true, // Skip rows that cause parsing errors
-      trim: true, // Trim whitespace from values
-    })
-
-    // Log the first record to help debug the structure
-    if (records.length > 0) {
-      console.log("First Amex record structure:", Object.keys(records[0]))
-    }
-
-    return records
-      .map((record: any) => {
-        // Try to extract date from various possible column names
-        const dateValue = record.Date || record["Transaction Date"] || record["Trans Date"] || ""
-        let date: Date
-
-        try {
-          // Try to parse the date
-          date = new Date(dateValue)
-          // Check if date is valid
-          if (isNaN(date.getTime())) {
-            // If invalid, use current date
-            date = new Date()
-          }
-        } catch (e) {
-          // If date parsing fails, use current date
-          date = new Date()
-        }
-
-        // Try to extract amount from various possible column names
-        const amountValue = record.Amount || record["Transaction Amount"] || record["Amount (USD)"] || "0"
-        let amount = 0
-
-        try {
-          // Remove any non-numeric characters except decimal point and minus sign
-          const cleanedAmount = amountValue.toString().replace(/[^\d.-]/g, "")
-          amount = Number.parseFloat(cleanedAmount) || 0
-        } catch (e) {
-          amount = 0
-        }
-
-        // Try to determine if it's a credit or debit
-        const description = record.Description || record["Merchant"] || record["Description"] || "Unknown transaction"
-        const isCredit =
-          (record["Transaction Type"] && record["Transaction Type"].toLowerCase().includes("credit")) ||
-          description.toLowerCase().includes("payment") ||
-          description.toLowerCase().includes("refund") ||
-          description.toLowerCase().includes("credit")
-
-        // Amex typically shows expenses as positive numbers, so we negate them unless they're credits
-        const finalAmount = isCredit ? Math.abs(amount) : -Math.abs(amount)
-
-        return {
-          date: date.toISOString(),
-          description,
-          amount: finalAmount,
-          categoryId: null,
-          accountId: "amex-account",
-        }
-      })
-      .filter((tx: Transaction) => !isNaN(tx.amount))
-  } catch (error) {
-    console.error("Error parsing Amex statement:", error)
-    // Create some sample transactions for demonstration
-    return [
-      {
-        id: `amex-sample-1`,
-        date: new Date().toISOString(),
-        description: "SAMPLE AMEX TRANSACTION",
-        amount: -12545.00,
-        categoryId: null,
-        accountId: "amex-account",
-        statementId: "sample-statement",
-      },
-      {
-        id: `amex-sample-2`,
-        date: new Date().toISOString(),
-        description: "SAMPLE AMEX PAYMENT",
-        amount: 50000.00,
-        categoryId: null,
-        accountId: "amex-account",
-        statementId: "sample-statement",
-      },
-    ]
-  }
-}
-
-function parseSampathStatement(content: string): Transaction[] {
-  try {
-    if (!content || typeof content !== "string") {
-      console.error("Invalid content provided to parseSampathStatement:", content)
-      return []
-    }
-
-    const lines = content.split("\n")
-    const transactions: Transaction[] = []
-    let currentAccountNumber = "unknown-account"
-
-    // First pass: look for account numbers
-    const accountPattern = /\b\d{12}\b/  // Pattern for 12-digit account numbers
-    lines.forEach(line => {
-      const match = line.match(accountPattern)
-      if (match) {
-        currentAccountNumber = match[0]
-      }
-    })
-
-    // Look for transaction patterns in the text
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i]
-
-      // Look for account number in current line
-      const accountMatch = line.match(accountPattern)
-      if (accountMatch) {
-        currentAccountNumber = accountMatch[0]
-        continue
-      }
-
-      // Look for date patterns like DD/MM/YY
-      const dateMatch = line.match(/(\d{2})\/(\d{2})\/(\d{2})/)
-      if (dateMatch) {
-        const descriptionLine = lines[i + 1] || ""
-        const amountLine = lines[i + 2] || ""
-
-        // Extract amount - look for currency patterns
-        const amountMatch = amountLine.match(/[\d,]+\.\d{2}/)
-        if (amountMatch) {
-          const amount = Number.parseFloat(amountMatch[0].replace(/,/g, ""))
-
-          transactions.push({
-            date: new Date(`20${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]}`).toISOString(),
-            description: descriptionLine.trim() || "Unknown transaction",
-            amount: descriptionLine.includes("CR") ? amount : -amount,
-            categoryId: null,
-            accountId: currentAccountNumber,
-          })
-        }
-      }
-    }
-
-    // If we couldn't parse any transactions, create samples with the detected account number
-    if (transactions.length === 0 && currentAccountNumber !== "unknown-account") {
-      if (content.includes("NIHAL STORES")) {
-        transactions.push({
-          date: new Date("2025-03-23").toISOString(),
-          description: "NIHAL STORES & DISTRIBUTO, KANDY",
-          amount: -10405.75,
-          categoryId: null,
-          accountId: currentAccountNumber,
-        })
-      }
-
-      if (content.includes("VENUS PHARMACY")) {
-        transactions.push({
-          date: new Date("2025-03-28").toISOString(),
-          description: "VENUS PHARMACY, KANDY",
-          amount: -1750.0,
-          categoryId: null,
-          accountId: currentAccountNumber,
-        })
-      }
-
-      if (content.includes("PAYMENT RECEIVED")) {
-        transactions.push({
-          date: new Date("2025-04-01").toISOString(),
-          description: "PAYMENT RECEIVED - CEFT",
-          amount: 250000.0,
-          categoryId: null,
-          accountId: currentAccountNumber,
-        })
-      }
-    }
 
     return transactions
   } catch (error) {
-    console.error("Error parsing Sampath statement:", error)
-    return []
+    console.error('Error fetching transactions by category:', error)
+    throw error
   }
 }
 
-function parseGenericStatement(csvContent: string): Transaction[] {
+export async function getTransactionSummary(timeRange: string, customStartDate?: string, customEndDate?: string): Promise<TransactionSummary> {
   try {
-    if (!csvContent || typeof csvContent !== "string") {
-      console.error("Invalid content provided to parseGenericStatement:", csvContent)
-      return []
+    console.log('Getting transaction summary for timeRange:', timeRange)
+    const now = new Date()
+    let startDate: Date
+    let previousStartDate: Date
+    let previousEndDate: Date
+
+    switch (timeRange) {
+      case 'custom':
+        // Handle custom date range if provided
+        if (customStartDate && customEndDate) {
+          startDate = new Date(customStartDate)
+          // For the previous period, use the same duration before the start date
+          const duration = new Date(customEndDate).getTime() - startDate.getTime()
+          previousEndDate = new Date(startDate.getTime() - 1)
+          previousStartDate = new Date(startDate.getTime() - duration - 1)
+        } else {
+          // Fallback to current month if custom dates aren't provided
+          startDate = new Date(now.getFullYear(), now.getMonth(), 1)
+          previousStartDate = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+          previousEndDate = new Date(now.getFullYear(), now.getMonth(), 0)
+        }
+        break
+      case 'month':
+        // This month: from 1st of current month to now
+        startDate = new Date(now.getFullYear(), now.getMonth(), 1)
+        // Previous month: from 1st to last day of previous month
+        previousStartDate = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+        previousEndDate = new Date(now.getFullYear(), now.getMonth(), 0)
+        break
+      case 'quarter':
+        // Current quarter
+        startDate = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1)
+        // Previous quarter
+        previousStartDate = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3 - 3, 1)
+        previousEndDate = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 0)
+        break
+      case 'year':
+        // Current year: from Jan 1st to now
+        startDate = new Date(now.getFullYear(), 0, 1)
+        // Previous year: all of last year
+        previousStartDate = new Date(now.getFullYear() - 1, 0, 1)
+        previousEndDate = new Date(now.getFullYear(), 0, 0)
+        break
+      case 'all':
+        // For 'all time', use a very old start date
+        startDate = new Date(2000, 0, 1)
+        previousStartDate = new Date(1999, 0, 1)
+        previousEndDate = new Date(1999, 11, 31)
+        break
+      default:
+        // Default to current month
+        startDate = new Date(now.getFullYear(), now.getMonth(), 1)
+        previousStartDate = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+        previousEndDate = new Date(now.getFullYear(), now.getMonth(), 0)
     }
 
-    const records = parse(csvContent, {
-      columns: true,
-      skip_empty_lines: true,
-      relax_column_count: true,
-      skip_records_with_error: true,
-      trim: true,
+    console.log('Date ranges:', {
+      startDate: startDate.toISOString(),
+      previousStartDate: previousStartDate.toISOString(),
+      previousEndDate: previousEndDate.toISOString()
     })
 
-    return records
-      .map((record: any) => {
-        // Look for account number in the first column or specific account column
-        const accountField = findField(record, ["Account No", "Account Number", "AccountNumber", "Account"])
-        const accountNumber = record[accountField] || Object.values(record)[0] || "unknown-account"
+    // First, check if there are any transactions in the database at all
+    const totalCount = await prisma.transaction.count()
+    console.log('Total transactions in database:', totalCount)
+    
+    // If there are no transactions at all, return empty data
+    if (totalCount === 0) {
+      return createEmptySummary()
+    }
 
-        // Look for common column names
-        const dateField = findField(record, ["date", "transaction_date", "trans_date", "Date"])
-        const descriptionField = findField(record, ["description", "desc", "narrative", "details", "Description"])
-        const amountField = findField(record, ["amount", "value", "Amount", "Transaction Amount"])
-
-        let date = new Date()
-        if (record[dateField]) {
-          try {
-            date = new Date(record[dateField])
-            if (isNaN(date.getTime())) {
-              date = new Date()
-            }
-          } catch (e) {
-            // Keep default date
-          }
+    // Get all transactions for the dashboard regardless of time range
+    // The issue is that the transactions have dates from Feb-Mar 2024, but we're filtering for May 2025
+    let currentTransactionsQuery = {}
+    let previousTransactionsQuery = {}
+    
+    // Log a sample transaction to check its date format
+    const sampleTransaction = await prisma.transaction.findFirst()
+    if (sampleTransaction) {
+      console.log('Sample transaction date:', sampleTransaction.date)
+    }
+    
+    // Set up the date filters based on the time range
+    if (timeRange === 'all') {
+      // For 'all time', don't filter by date at all
+      currentTransactionsQuery = {}
+      previousTransactionsQuery = {}
+    } else if (timeRange === 'custom' && customStartDate && customEndDate) {
+      // For custom date range
+      const customStart = new Date(customStartDate)
+      const customEnd = new Date(customEndDate)
+      customEnd.setHours(23, 59, 59, 999) // Include the entire end day
+      
+      // Calculate the previous period with the same duration
+      const duration = customEnd.getTime() - customStart.getTime()
+      const prevPeriodEnd = new Date(customStart.getTime() - 1)
+      const prevPeriodStart = new Date(prevPeriodEnd.getTime() - duration)
+      
+      currentTransactionsQuery = {
+        date: {
+          gte: customStart,
+          lte: customEnd
         }
-
-        let amount = 0
-        if (record[amountField]) {
-          try {
-            amount = Number.parseFloat(record[amountField].toString().replace(/[^\d.-]/g, "")) || 0
-          } catch (e) {
-            amount = 0
-          }
+      }
+      
+      previousTransactionsQuery = {
+        date: {
+          gte: prevPeriodStart,
+          lte: prevPeriodEnd
         }
-
-        // Try to determine if credit or debit
-        const typeField = findField(record, ["type", "transaction_type", "dc", "Type"])
-        if (record[typeField]) {
-          const type = record[typeField].toString().toLowerCase()
-          if (type.includes("debit") || type.includes("d") || type === "dr") {
-            amount = -Math.abs(amount)
-          } else if (type.includes("credit") || type.includes("c") || type === "cr") {
-            amount = Math.abs(amount)
-          }
+      }
+    } else {
+      // For standard time ranges (month, quarter, year)
+      currentTransactionsQuery = {
+        date: {
+          gte: startDate,
+          lte: now
         }
-
-        return {
-          date: date.toISOString(),
-          description: record[descriptionField] || "Unknown transaction",
-          amount,
-          categoryId: null,
-          accountId: accountNumber.toString().trim(),
+      }
+      
+      previousTransactionsQuery = {
+        date: {
+          gte: previousStartDate,
+          lte: previousEndDate
         }
+      }
+    }
+
+    const [
+      currentTransactions,
+      previousTransactions
+    ] = await Promise.all([
+      prisma.transaction.findMany({
+        where: currentTransactionsQuery,
+        include: { category: true }
+      }),
+      prisma.transaction.findMany({
+        where: previousTransactionsQuery
       })
-      .filter((tx: Transaction) => !isNaN(tx.amount))
+    ])
+
+    console.log('Current transactions found:', currentTransactions.length)
+    console.log('Previous transactions found:', previousTransactions.length)
+    
+    // Log a few sample transactions if available
+    if (currentTransactions.length > 0) {
+      console.log('Sample current transaction:', JSON.stringify(currentTransactions[0]))
+    }
+
+    const expenses = currentTransactions.filter(t => t.amount < 0)
+    console.log('Expense transactions found:', expenses.length)
+    
+    const totalExpenses = Math.abs(expenses.reduce((sum, t) => sum + t.amount, 0))
+    const totalIncome = currentTransactions.filter(t => t.amount > 0).reduce((sum, t) => sum + t.amount, 0)
+    const netBalance = totalIncome - totalExpenses
+    const savingsRate = totalIncome > 0 ? (netBalance / totalIncome) * 100 : 0
+
+    console.log('Summary calculations:', {
+      totalExpenses,
+      totalIncome,
+      netBalance,
+      savingsRate
+    })
+
+    const previousExpenses = Math.abs(previousTransactions.filter(t => t.amount < 0).reduce((sum, t) => sum + t.amount, 0))
+    const previousIncome = previousTransactions.filter(t => t.amount > 0).reduce((sum, t) => sum + t.amount, 0)
+
+    const expenseChange = previousExpenses ? ((totalExpenses - previousExpenses) / previousExpenses) * 100 : 0
+    const incomeChange = previousIncome ? ((totalIncome - previousIncome) / previousIncome) * 100 : 0
+
+    const expensesByCategory = Object.entries(
+      expenses.reduce((acc, transaction) => {
+        const categoryName = transaction.category?.name || 'Other'
+        acc[categoryName] = (acc[categoryName] || 0) + Math.abs(transaction.amount)
+        return acc
+      }, {} as Record<string, number>)
+    ).map(([category, amount]) => ({
+      category,
+      amount
+    }))
+
+    const monthlyData = Array.from(
+      currentTransactions.reduce((acc, transaction) => {
+        const date = new Date(transaction.date)
+        const monthKey = date.toLocaleString('default', { month: 'short' })
+        
+        if (!acc.has(monthKey)) {
+          acc.set(monthKey, { month: monthKey, income: 0, expenses: 0 })
+        }
+        
+        const monthData = acc.get(monthKey)!
+        if (transaction.amount > 0) {
+          monthData.income += transaction.amount
+        } else {
+          monthData.expenses += Math.abs(transaction.amount)
+        }
+        
+        return acc
+      }, new Map<string, { month: string; income: number; expenses: number }>())
+    ).map(([_, data]) => data)
+
+    const monthOrder = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    monthlyData.sort((a, b) => monthOrder.indexOf(a.month) - monthOrder.indexOf(b.month))
+
+    const result = {
+      totalIncome,
+      totalExpenses,
+      netBalance,
+      incomeChange,
+      expenseChange,
+      savingsRate,
+      expensesByCategory,
+      monthlyData,
+    }
+    
+    console.log('Returning summary result:', JSON.stringify(result))
+    return result
   } catch (error) {
-    console.error("Error parsing generic statement:", error)
-    return []
+    console.error('Error in getTransactionSummary:', error)
+    return createEmptySummary()
   }
 }
 
+// Helper function to create an empty summary when no data is available
+function createEmptySummary(): TransactionSummary {
+  return {
+    totalIncome: 0,
+    totalExpenses: 0,
+    netBalance: 0,
+    incomeChange: 0,
+    expenseChange: 0,
+    savingsRate: 0,
+    expensesByCategory: [],
+    monthlyData: [],
+  }
+}
+
+// Helper function to find matching field names in CSV records
 function findField(record: any, possibleNames: string[]): string {
   for (const name of possibleNames) {
     if (record[name] !== undefined) {
@@ -717,4 +736,236 @@ function findField(record: any, possibleNames: string[]): string {
     }
   }
   return Object.keys(record)[0] || ""
+}
+
+// Regular expression for detecting account numbers
+const accountPattern = /\b\d{8,}\b/  // Matches 8 or more consecutive digits
+
+function getAccountNumberFromCSV(csvContent: string): string | null {
+  try {
+    const records = parse(csvContent, {
+      columns: true,
+      skip_empty_lines: true,
+      relax_column_count: true,
+      skip_records_with_error: true,
+      from_line: 1,
+      to_line: 5, // Only check first few lines for account number
+    })
+
+    // Look for account number in specific columns or first column
+    for (const record of records) {
+      // Common account number column names
+      const accountFields = [
+        "Account No",
+        "Account Number",
+        "AccountNumber",
+        "Account",
+        "acc_no",
+        "account_no",
+      ]
+
+      // Check each possible field name
+      for (const field of accountFields) {
+        if (record[field]) {
+          return record[field].toString().trim()
+        }
+      }
+
+      // If no specific account field found, check if first column contains an account number
+      const firstValue = Object.values(record)[0]
+      if (firstValue && /^\d{8,}$/.test(firstValue.toString().trim())) {
+        return firstValue.toString().trim()
+      }
+    }
+  } catch (error) {
+    console.error("Error parsing CSV for account number:", error)
+  }
+  return null
+}
+
+// Helper function to parse any statement format
+function parseStatement(csvContent: string, fileName: string = ""): Transaction[] {
+  try {
+    if (!csvContent || typeof csvContent !== "string") {
+      console.error("Invalid content provided to parseStatement")
+      return []
+    }
+
+    // First try to get account number from CSV
+    const accountFromCSV = getAccountNumberFromCSV(csvContent)
+    console.log("Account from CSV:", accountFromCSV)
+
+    // Use filename as the account identifier if no account number found
+    const accountIdentifier = accountFromCSV || fileName || "unknown-account"
+    console.log("Using account identifier:", accountIdentifier)
+
+    // Try parsing as CSV first
+    try {
+      const records = parse(csvContent, {
+        columns: true,
+        skip_empty_lines: true,
+        relax_column_count: true,
+        skip_records_with_error: true,
+        trim: true,
+      })
+
+      console.log("Successfully parsed CSV with columns:", records.length > 0 ? Object.keys(records[0]) : [])
+
+      return records
+        .map((record: any) => {
+          // Look for common field names for each data point
+          const accountField = findField(record, [
+            "Account No",
+            "Account Number",
+            "AccountNumber",
+            "Account",
+            "acc_no",
+            "account_no"
+          ])
+          const dateField = findField(record, ["date", "transaction_date", "trans_date", "Date", "Trans Date"])
+          const descriptionField = findField(record, ["description", "desc", "narrative", "details", "Description", "Merchant"])
+          const amountField = findField(record, ["amount", "value", "Amount", "Transaction Amount", "Amount (USD)", "Deposits", "Withdrawals"])
+          const typeField = findField(record, ["type", "transaction_type", "dc", "Type", "Transaction Type"])
+
+          // Get the account number from the CSV record, falling back to our determined account identifier
+          const recordAccountNumber = record[accountField] || Object.values(record)[0]
+          const finalAccountId = recordAccountNumber || accountIdentifier
+
+          // Rest of the parsing logic...
+          let date = new Date()
+          if (record[dateField]) {
+            try {
+              date = new Date(record[dateField])
+              if (isNaN(date.getTime())) {
+                // Check for date formats with and without year
+                let dateMatch = record[dateField].match(/(\d{2})[/-](\d{2})[/-](\d{2,4})/)
+                
+                // If no year in the format, try matching just day and month
+                if (!dateMatch) {
+                  dateMatch = record[dateField].match(/(\d{2})[/-](\d{2})/)
+                }
+                
+                if (dateMatch) {
+                  const day = dateMatch[1]
+                  const month = dateMatch[2]
+                  
+                  // If we have a year in the match, use it; otherwise use current year
+                  const year = dateMatch[3] ? 
+                    (dateMatch[3].length === 2 ? '20' + dateMatch[3] : dateMatch[3]) : 
+                    new Date().getFullYear().toString()
+                  
+                  date = new Date(`${year}-${month}-${day}`)
+                }
+              }
+            } catch (e) {
+              date = new Date()
+            }
+          }
+
+          let amount = 0
+          if (record[amountField]) {
+            try {
+              const cleanedAmount = record[amountField].toString().replace(/[^\d.-]/g, "")
+              amount = Number.parseFloat(cleanedAmount) || 0
+            } catch (e) {
+              amount = 0
+            }
+          }
+
+          let isCredit = false
+          if (record[typeField]) {
+            const type = record[typeField].toString().toLowerCase()
+            isCredit = type.includes("credit") || type.includes("c") || type === "cr"
+          }
+          
+          const description = record[descriptionField] || "Unknown transaction"
+          if (!isCredit) {
+            isCredit = description.toLowerCase().includes("payment") ||
+                      description.toLowerCase().includes("refund") ||
+                      description.toLowerCase().includes("credit") ||
+                      description.toLowerCase().includes("deposit")
+          }
+
+          if (record["Deposits"] && Number.parseFloat(record["Deposits"]) > 0) {
+            isCredit = true
+            amount = Number.parseFloat(record["Deposits"])
+          }
+
+          if (record["Withdrawals"] && Number.parseFloat(record["Withdrawals"]) > 0) {
+            isCredit = false
+            amount = Number.parseFloat(record["Withdrawals"])
+          }
+
+          const finalAmount = isCredit ? Math.abs(amount) : -Math.abs(amount)
+
+          return {
+            id: `tx-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+            date: date.toISOString(),
+            description,
+            amount: finalAmount,
+            categoryId: null,
+            accountId: finalAccountId,
+            statementId: `statement-${Date.now()}`
+          }
+        })
+        .filter((tx: Transaction) => !isNaN(tx.amount) && tx.amount !== 0)
+
+    } catch (csvError) {
+      console.log("CSV parsing failed, trying plain text parsing:", csvError)
+      const lines = csvContent.split("\n")
+      const transactions: Transaction[] = []
+
+      lines.forEach((line, i) => {
+        const accountMatch = line.match(accountPattern)
+        if (accountMatch) {
+          return
+        }
+
+        // Try to match date with year first
+        let dateMatch = line.match(/(\d{2})[/-](\d{2})[/-](\d{2,4})/)
+        
+        // If no match with year, try matching just day and month
+        if (!dateMatch) {
+          dateMatch = line.match(/(\d{2})[/-](\d{2})/)
+        }
+        
+        if (dateMatch) {
+          const descriptionLine = lines[i + 1] || ""
+          const amountLine = lines[i + 2] || ""
+
+          const amountMatch = amountLine.match(/[\d,]+\.\d{2}/)
+          if (amountMatch) {
+            const amount = Number.parseFloat(amountMatch[0].replace(/,/g, ""))
+            const description = descriptionLine.trim() || "Unknown transaction"
+            const isCredit = description.toLowerCase().includes("cr") ||
+                           description.toLowerCase().includes("credit") ||
+                           description.toLowerCase().includes("payment") ||
+                           description.toLowerCase().includes("refund") ||
+                           description.toLowerCase().includes("deposit")
+
+            transactions.push({
+              id: `tx-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+              date: new Date(
+                // If we have a year (dateMatch[3]), use it (with 20 prefix if it's 2 digits)
+                // Otherwise use the current year
+                dateMatch[3] ? 
+                  `${dateMatch[3].length === 2 ? '20' + dateMatch[3] : dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]}` : 
+                  `${new Date().getFullYear()}-${dateMatch[2]}-${dateMatch[1]}`
+              ).toISOString(),
+              description,
+              amount: isCredit ? Math.abs(amount) : -Math.abs(amount),
+              categoryId: null,
+              accountId: accountIdentifier,
+              statementId: `statement-${Date.now()}`
+            })
+          }
+        }
+      })
+
+      return transactions
+    }
+  } catch (error) {
+    console.error("Error parsing statement:", error)
+    return []
+  }
 }
